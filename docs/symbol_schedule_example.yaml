@@ -1,0 +1,11 @@
+# Symbol Schedule Example Configuration
+# Maps day of week (0=Monday, 6=Sunday) to trading symbols
+
+symbol_schedule:
+  0: "EURUSDm"    # Monday
+  1: "XAUUSDm"    # Tuesday  
+  2: "USOILm"     # Wednesday
+  3: "NVDAm"      # Thursday
+  4: "BTCUSDm"    # Friday
+  5: "BTCUSDm"    # Saturday
+  6: "BTCUSDm"    # Sunday
