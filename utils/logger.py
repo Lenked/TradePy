@@ -3,6 +3,7 @@ Centralized logging utility for TradePy bot
 """
 import logging
 import sys
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -10,8 +11,12 @@ from typing import Optional
 class Logger:
     """Centralized logging utility class using Python's logging module"""
 
-    def __init__(self, name: str, level: int = logging.INFO):
+    def __init__(self, name: str, level: int = None):
         self.name = name
+        
+        # Default to INFO level if not specified, but allow override from environment
+        if level is None:
+            level = self._get_log_level_from_env()
 
         # Create logger
         self.logger = logging.getLogger(name)
@@ -39,6 +44,20 @@ class Logger:
             # Add handlers to logger
             self.logger.addHandler(console_handler)
             self.logger.addHandler(file_handler)
+    
+    def _get_log_level_from_env(self):
+        """Get log level from environment variable or default to INFO"""
+        log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
+        
+        log_levels = {
+            'DEBUG': logging.DEBUG,
+            'INFO': logging.INFO,
+            'WARNING': logging.WARNING,
+            'ERROR': logging.ERROR,
+            'CRITICAL': logging.CRITICAL
+        }
+        
+        return log_levels.get(log_level_str, logging.INFO)
 
     def info(self, message: str):
         """Log info message"""

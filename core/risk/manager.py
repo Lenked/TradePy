@@ -21,3 +21,21 @@ class RiskManager:
             if rule.enabled and not rule.validate(*args, **kwargs):
                 return False
         return True
+    
+    def allow_trade(self, signal, sl, tp, account_snapshot):
+        """Check if a trade is allowed based on risk rules"""
+        # Default implementation allowing trade if no rules are configured
+        if not self.rules:
+            return True
+        
+        # Validate against all configured rules
+        for rule in self.rules:
+            if rule.enabled and hasattr(rule, 'validate'):
+                try:
+                    # Call the rule's validate method with appropriate parameters
+                    if not rule.validate(signal, sl, tp, account_snapshot):
+                        return False, f"Rule '{rule.__class__.__name__}' blocked trade"
+                except Exception as e:
+                    return False, f"Rule '{rule.__class__.__name__}' validation error: {e}"
+        
+        return True, "Trade allowed by risk management"

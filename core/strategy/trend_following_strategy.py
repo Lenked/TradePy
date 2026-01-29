@@ -156,3 +156,84 @@ class TrendFollowingStrategy(Strategy):
             'rsi_period': self.rsi_period,
             'atr_period': self.atr_period
         }
+    
+    def compute_sl_tp(self, df: pd.DataFrame, signal: str) -> Tuple[float, float]:
+        """
+        Compute stop loss and take profit levels.
+        
+        Args:
+            df: DataFrame with market data
+            signal: Trading signal ('BUY' or 'SELL')
+            
+        Returns:
+            Tuple[float, float]: (stop_loss, take_profit) values
+        """
+        if df is None or df.empty:
+            raise ValueError("DataFrame cannot be None or empty")
+            
+        if len(df) < 2:
+            raise ValueError("DataFrame must have at least 2 rows")
+        
+        current_price = df['close'].iloc[-1]
+        
+        # Calculate ATR for dynamic stop loss
+        atr_period = min(self.atr_period, len(df) - 1)
+        atr_df = df.tail(atr_period + 10) if len(df) > atr_period + 10 else df
+        atr = self.calculate_atr(atr_df, atr_period).iloc[-1]
+        
+        # Default risk parameters
+        sl_multiplier = 2.0  # Stop loss is 2x ATR away
+        tp_multiplier = 3.0  # Take profit is 3x ATR away (risk-reward ratio 1:1.5)
+        
+        if signal.upper() == 'BUY':
+            sl = current_price - (sl_multiplier * atr)
+            tp = current_price + (tp_multiplier * atr)
+        elif signal.upper() == 'SELL':
+            sl = current_price + (sl_multiplier * atr)
+            tp = current_price - (tp_multiplier * atr)
+        else:
+            raise ValueError(f"Invalid signal: {signal}. Expected 'BUY' or 'SELL'")
+        
+        return sl, tp
+    
+    def compute_volume(self, df: pd.DataFrame, signal: str, account_equity: float) -> float:
+        """
+        Compute position size/volume based on account equity and risk management.
+        
+        Args:
+            df: DataFrame with market data
+            signal: Trading signal ('BUY' or 'SELL')
+            account_equity: Current account equity
+            
+        Returns:
+            float: Position size/volume
+        """
+        # Risk management: risk 2% of account equity per trade
+        risk_percentage = 0.02
+        risk_amount = account_equity * risk_percentage
+        
+        # Calculate ATR for position sizing
+        current_price = df['close'].iloc[-1]
+        
+        atr_period = min(self.atr_period, len(df) - 1)
+        atr_df = df.tail(atr_period + 10) if len(df) > atr_period + 10 else df
+        atr = self.calculate_atr(atr_df, atr_period).iloc[-1]
+        
+        # Calculate risk per unit (difference between entry and stop loss)
+        sl, _ = self.compute_sl_tp(df, signal)
+        risk_per_unit = abs(current_price - sl) if sl is not None else atr * 2.0
+        
+        # Avoid division by zero
+        if risk_per_unit <= 0:
+            risk_per_unit = atr * 2.0  # Default to 2x ATR if SL calculation fails
+        
+        # Calculate volume
+        volume = risk_amount / risk_per_unit
+        
+        # Apply minimum and maximum volume constraints
+        min_volume = 0.01  # Minimum lot size
+        max_volume = account_equity * 0.1  # Max 10% of equity per position
+        
+        volume = max(min_volume, min(volume, max_volume))
+        
+        return volume

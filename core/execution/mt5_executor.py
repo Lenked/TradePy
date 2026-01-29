@@ -249,8 +249,9 @@ class MT5Executor(LiveExchangeInterface):
         success = result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
 
         if success:
-            self.logger.info(f"Order placed for {symbol} - Side: {side}, Volume: {volume}, SL: {sl}, TP: {tp}")
+            self.logger.info(f"MT5_ORDER_SENT - Ticket: {result.ticket} - {side} {volume} {symbol} | SL: {sl} | TP: {tp} | Retcode: {result.retcode}")
+            print(f"MT5_ORDER_SENT - Ticket: {result.ticket} - {side} {volume} {symbol} | SL: {sl} | TP: {tp}")
         else:
-            self.logger.error(f"Order failed for {symbol} - Result: {result}")
+            self.logger.error(f"MT5_ORDER_FAILED - Symbol: {symbol} - Retcode: {result.retcode if result else 'N/A'} - Comment: {comment}")
 
         return success
