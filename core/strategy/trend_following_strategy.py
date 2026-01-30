@@ -206,12 +206,35 @@ class TrendFollowingStrategy(Strategy):
             account_equity: Current account equity
             
         Returns:
-            float: Position size/volume
+            float: Position size/volume in lots
         """
-        # Risk management: risk 2% of account equity per trade
-        risk_percentage = 0.02
-        risk_amount = account_equity * risk_percentage
+        # Get the current symbol from the dataframe index (assuming the last row contains current data)
+        # For MT5, we typically want conservative position sizing
+        # Use a fixed small lot size as default, regardless of account equity to avoid retcode=10014
         
+        # Conservative position sizing for live trading
+        if self.name.lower().find('demo') != -1 or str(account_equity).find('demo') != -1 or self.name.find('Demo') != -1:
+            # In demo environment, use very small volumes
+            base_volume = 0.01
+        else:
+            # For live trading, determine a reasonable risk-based volume
+            # Risk management: use conservative percentage of account equity per trade
+            # For typical MT5 accounts, use 1-2% of equity but capped to reasonable lot sizes
+            risk_percentage = 0.01  # 1% risk per trade (conservative)
+            
+            # Estimate risk amount based on 1:3 risk-reward ratio assumption
+            # Using a conservative approach: 0.01-0.05 lots for most retail accounts
+            if account_equity < 1000:
+                base_volume = 0.01  # Very small for small accounts
+            elif account_equity < 5000:
+                base_volume = 0.02
+            elif account_equity < 10000:
+                base_volume = 0.03
+            elif account_equity < 25000:
+                base_volume = 0.05
+            else:
+                base_volume = min(0.10, account_equity * 0.001)  # Cap at 0.10 lots or 0.1% of equity
+
         # Calculate ATR for position sizing
         current_price = df['close'].iloc[-1]
         
@@ -227,12 +250,16 @@ class TrendFollowingStrategy(Strategy):
         if risk_per_unit <= 0:
             risk_per_unit = atr * 2.0  # Default to 2x ATR if SL calculation fails
         
-        # Calculate volume
-        volume = risk_amount / risk_per_unit
+        # Calculate volume based on risk management
+        risk_amount = account_equity * 0.01  # Risk 1% of equity
+        calculated_volume = risk_amount / risk_per_unit
         
-        # Apply minimum and maximum volume constraints
-        min_volume = 0.01  # Minimum lot size
-        max_volume = account_equity * 0.1  # Max 10% of equity per position
+        # Use the calculated volume but cap it to reasonable limits
+        volume = min(calculated_volume, base_volume)
+        
+        # Apply minimum and maximum volume constraints appropriate for MT5
+        min_volume = 0.01  # Minimum lot size supported by most brokers
+        max_volume = 100.0  # Maximum lot size (this is quite large, most brokers have lower limits)
         
         volume = max(min_volume, min(volume, max_volume))
         

@@ -66,7 +66,61 @@ class MT5Executor(LiveExchangeInterface):
 
         self.account_mode = self._detect_account_mode(info)
         self.logger.info(f"MT5 connection established - Mode={self.account_mode}")
+        
+        # Perform startup check for symbol volume constraints
+        self._log_symbol_constraints()
         return True
+
+    def _log_symbol_constraints(self):
+        """Log symbol volume constraints for commonly traded symbols"""
+        # Common forex symbols to check
+        common_symbols = [
+            "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", 
+            "USDCHF", "EURGBP", "EURJPY", "GBPJPY", "XAUUSD", "XAGUSD"
+        ]
+        
+        self.logger.info("=" * 60)
+        self.logger.info("MT5 SYMBOL VOLUME CONSTRAINTS CHECK:")
+        self.logger.info("=" * 60)
+        self.logger.info(f"{'Symbol':<10} {'Min Lot':<10} {'Max Lot':<12} {'Step':<10} {'Contract Size':<15}")
+        self.logger.info("-" * 60)
+        
+        for symbol in common_symbols:
+            # Select the symbol first to ensure it's available
+            if mt5.symbol_select(symbol, True):
+                symbol_info = mt5.symbol_info(symbol)
+                if symbol_info is not None:
+                    # Extract volume constraints
+                    min_lot = symbol_info.volume_min
+                    max_lot = symbol_info.volume_max
+                    step = symbol_info.volume_step
+                    contract_size = getattr(symbol_info, 'trade_contract_size', 'N/A')
+                    
+                    self.logger.info(f"{symbol:<10} {min_lot:<10.2f} {max_lot:<12.2f} {step:<10.2f} {contract_size:<15}")
+                else:
+                    self.logger.info(f"{symbol:<10} {'N/A':<10} {'N/A':<12} {'N/A':<10} {'N/A':<15}")
+            else:
+                # Try with different variations that might exist on Exness
+                variations = [f"Exness-{symbol}", f"{symbol}.m"]
+                found = False
+                for variant in variations:
+                    if mt5.symbol_select(variant, True):
+                        symbol_info = mt5.symbol_info(variant)
+                        if symbol_info is not None:
+                            min_lot = symbol_info.volume_min
+                            max_lot = symbol_info.volume_max
+                            step = symbol_info.volume_step
+                            contract_size = getattr(symbol_info, 'trade_contract_size', 'N/A')
+                            
+                            self.logger.info(f"{variant:<10} {min_lot:<10.2f} {max_lot:<12.2f} {step:<10.2f} {contract_size:<15}")
+                            found = True
+                            break
+                if not found:
+                    self.logger.info(f"{symbol:<10} {'Not Found':<10} {'Not Found':<12} {'Not Found':<10} {'Not Found':<15}")
+        
+        self.logger.info("-" * 60)
+        self.logger.info("Volume constraints will be automatically applied to all orders")
+        self.logger.info("=" * 60)
 
     def shutdown(self) -> None:
         mt5.shutdown()
@@ -103,13 +157,82 @@ class MT5Executor(LiveExchangeInterface):
         pos = self.positions(symbol=symbol)
         return float(sum(p.profit for p in pos)) if pos else 0.0
 
+    def _normalize_volume(self, volume: float, symbol_info) -> float:
+        """
+        Normalize volume based on symbol's volume constraints.
+        
+        Args:
+            volume: Original volume to normalize
+            symbol_info: Symbol info object from mt5.symbol_info()
+            
+        Returns:
+            float: Normalized volume that meets symbol requirements
+        """
+        if symbol_info is None:
+            self.logger.error("_normalize_volume called with None symbol_info")
+            return max(volume, 0.01)  # Return minimum default if no symbol info
+        
+        min_lot = symbol_info.volume_min
+        max_lot = symbol_info.volume_max
+        step = symbol_info.volume_step
+        
+        # Log original volume for debugging
+        self.logger.debug(f"VOLUME_NORMALIZATION - Symbol: {symbol_info.name} | "
+                         f"ORIGINAL_VOLUME: {volume} | MIN: {min_lot} | MAX: {max_lot} | STEP: {step}")
+        
+        # First clamp the volume between min and max
+        adjusted_volume = max(min_lot, min(volume, max_lot))
+        
+        # Then align with step increment
+        if step > 0:
+            # Calculate how many steps fit in the adjusted volume
+            steps = adjusted_volume / step
+            # Round down to nearest integer number of steps to ensure we don't exceed constraints
+            steps = int(steps)
+            # Recalculate the volume
+            adjusted_volume = steps * step
+            
+            # Ensure we don't go below min_lot after step adjustment
+            if adjusted_volume < min_lot:
+                adjusted_volume = min_lot
+        
+        # Round to avoid floating point precision issues
+        # Determine the appropriate number of decimal places based on step size
+        if step > 0:
+            # Count decimal places in step
+            step_str = str(step)
+            if '.' in step_str:
+                decimals = len(step_str.split('.')[1])
+            else:
+                decimals = 0
+            adjusted_volume = round(adjusted_volume, decimals)
+        else:
+            # If step is 0 (shouldn't happen normally), round to 2 decimal places as fallback
+            adjusted_volume = round(adjusted_volume, 2)
+        
+        # Final check to ensure volume is within bounds
+        adjusted_volume = max(min_lot, min(adjusted_volume, max_lot))
+        
+        self.logger.debug(f"VOLUME_NORMALIZED - Symbol: {symbol_info.name} | "
+                         f"ORIGINAL: {volume} | NORMALIZED: {adjusted_volume} | "
+                         f"MIN: {min_lot} | MAX: {max_lot} | STEP: {step}")
+        
+        return adjusted_volume
+    
     def place_market_order(self, symbol: str, side: str, volume: float, sl: float, tp: float,
                           comment: str = "TradePy Live") -> OrderResult:
         if not symbol or not symbol.strip():
             return OrderResult(success=False, message="invalid_symbol")
 
+        # Ensure the symbol is selected
         if not mt5.symbol_select(symbol, True):
             return OrderResult(success=False, message=f"symbol_select_failed: {mt5.last_error()}")
+
+        # Get symbol info to normalize volume
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            self.logger.error(f"MT5_SYMBOL_INFO_FAILED - Could not get symbol info for {symbol}")
+            return OrderResult(success=False, message=f"symbol_info_failed: {symbol}")
 
         side_upper = side.upper()
         if side_upper not in ["BUY", "SELL"]:
@@ -132,10 +255,13 @@ class MT5Executor(LiveExchangeInterface):
             order_type = mt5.ORDER_TYPE_SELL
             price = float(tick.bid)
 
+        # Normalize volume based on symbol constraints
+        normalized_volume = self._normalize_volume(volume, symbol_info)
+        
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
-            "volume": float(volume),
+            "volume": float(normalized_volume),  # Use normalized volume here
             "type": order_type,
             "price": price,
             "sl": float(sl),
@@ -148,7 +274,7 @@ class MT5Executor(LiveExchangeInterface):
         }
 
         if self.dry_run:
-            self.logger.info(f"MT5_DRY_RUN_ORDER_SIMULATED - {side_upper} {volume} {symbol} | SL: {sl} | TP: {tp} | Comment: {comment}")
+            self.logger.info(f"MT5_DRY_RUN_ORDER_SIMULATED - {side_upper} {normalized_volume} {symbol} | SL: {sl} | TP: {tp} | Comment: {comment}")
             return OrderResult(
                 success=True,
                 retcode=None,
@@ -170,7 +296,7 @@ class MT5Executor(LiveExchangeInterface):
 
         if success:
             self.logger.info(
-                f"MT5_ORDER_SENT - Ticket: {order_id} - {side_upper} {volume} {symbol} | SL: {sl} | TP: {tp} | Retcode: {retcode}"
+                f"MT5_ORDER_SENT - Ticket: {order_id} - {side_upper} {normalized_volume} {symbol} | SL: {sl} | TP: {tp} | Retcode: {retcode}"
             )
         else:
             self.logger.error(
