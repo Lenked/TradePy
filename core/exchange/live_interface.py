@@ -5,7 +5,7 @@ Defines minimal interface required for live trading operations
 from abc import ABC, abstractmethod
 from typing import Optional
 import pandas as pd
-from ..models import AccountSnapshot
+from ..models import AccountSnapshot, OrderResult
 
 
 class LiveExchangeInterface(ABC):
@@ -43,7 +43,7 @@ class LiveExchangeInterface(ABC):
 
     @abstractmethod
     def place_market_order(self, symbol: str, side: str, volume: float, sl: float, tp: float, 
-                          comment: str = "TradePy Live") -> bool:
+                          comment: str = "TradePy Live") -> OrderResult:
         """Place a market order with mandatory stop loss and take profit"""
         pass
 

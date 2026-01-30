@@ -171,6 +171,27 @@ The live runner supports automatic symbol selection based on the day of the week
 
 The live runner takes a strategy, exchange (MT5Executor), risk_manager, and kill_switch to execute trades in real-time.
 
+### Run MT5 Exness
+Safe by default: TradePy will not send real orders unless you explicitly accept live risk.
+
+```bash
+# 1) Copy and configure credentials
+copy .env.example .env  # Windows
+# cp .env.example .env  # Linux/Mac
+
+# 2) Dry-run with MT5 (no real orders sent)
+python main.py --mode live --config config/settings.yaml
+
+# 3) Real MT5 orders (requires explicit acknowledgement)
+python main.py --mode live --config config/settings.yaml --i-accept-live-risk
+```
+
+Notes:
+- `config/settings.yaml` controls `trading.use_mt5` and `trading.dry_run`.
+- MT5 dry-run logs: `MT5_DRY_RUN_ORDER_SIMULATED`
+- MT5 live logs: `MT5_ORDER_SENT`
+- Simulation logs: `SIM_ORDER_SENT`
+
 ### Setting up your own strategy
 To use your own trading strategy with the live runner, implement the following interface:
 

@@ -103,7 +103,7 @@ def main():
     class DummyRiskManager:
         def allow_trade(self, signal, sl, tp, account_snapshot):
             # This would implement risk management logic
-            return True  # Placeholder
+            return True, "ok"  # Placeholder
 
     class DummyKillSwitch:
         def evaluate(self, metrics):

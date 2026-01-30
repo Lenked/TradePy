@@ -2,41 +2,75 @@ import os
 from typing import Optional
 import pandas as pd
 import MetaTrader5 as mt5
-from dotenv import load_dotenv
 from ..exchange.live_interface import LiveExchangeInterface
-from ..models import AccountSnapshot
+from ..models import AccountSnapshot, OrderResult
 try:
     from ..utils.logger import get_logger
 except ImportError:
-    # Fallback for when running directly
     from utils.logger import get_logger
-
-# Load environment variables from .env file
-# NOTE: This should be handled by the calling code, not here (avoid side effects at import)
-# load_dotenv()
 
 
 class MT5Executor(LiveExchangeInterface):
-    def __init__(self, login: Optional[int] = None, password: Optional[str] = None, server: Optional[str] = None):
-        # Load environment variables only when needed, not at import time
-        load_dotenv()
+    def __init__(self, login: Optional[int] = None, password: Optional[str] = None,
+                 server: Optional[str] = None, dry_run: bool = True):
         self.login = login or int(os.getenv("MT5_LOGIN", "0"))
         self.password = password or os.getenv("MT5_PASSWORD", "")
         self.server = server or os.getenv("MT5_SERVER", "")
-
-        # Initialize logger
+        self.dry_run = dry_run
+        self.account_mode = None
         self.logger = get_logger("MT5Executor")
 
-    def connect(self) -> None:
+    def _detect_account_mode(self, account_info) -> str:
+        server_lower = (self.server or "").lower()
+        if any(key in server_lower for key in ["demo", "trial", "practice"]):
+            return "DEMO"
+        if any(key in server_lower for key in ["real", "live"]):
+            return "REAL"
+        trade_mode = getattr(account_info, "trade_mode", None)
+        if trade_mode is not None:
+            try:
+                trade_mode = int(trade_mode)
+                if trade_mode == 0:
+                    return "DEMO"
+                if trade_mode == 2:
+                    return "REAL"
+            except (TypeError, ValueError):
+                pass
+        return "DEMO" if self.dry_run else "REAL"
+
+    def connect(self) -> bool:
         if not mt5.initialize():
-            raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
+            self.logger.error(f"MT5 initialize failed: {mt5.last_error()}")
+            return False
         if not mt5.login(self.login, self.password, self.server):
             err = mt5.last_error()
             mt5.shutdown()
-            raise RuntimeError(f"MT5 login failed: {err}")
+            self.logger.error(f"MT5 login failed: {err}")
+            return False
+
+        info = mt5.account_info()
+        if info is None:
+            self.logger.error("MT5 account_info() returned None")
+            mt5.shutdown()
+            return False
+
+        if hasattr(info, "trade_allowed") and not info.trade_allowed:
+            self.logger.error("MT5 trading disabled or investor account detected (trade_allowed=False)")
+            mt5.shutdown()
+            return False
+
+        if hasattr(info, "trade_expert") and not info.trade_expert:
+            self.logger.error("MT5 trading disabled for expert advisors (trade_expert=False)")
+            mt5.shutdown()
+            return False
+
+        self.account_mode = self._detect_account_mode(info)
+        self.logger.info(f"MT5 connection established - Mode={self.account_mode}")
+        return True
 
     def shutdown(self) -> None:
         mt5.shutdown()
+        self.logger.info("MT5 connection shut down successfully")
 
     def account_info(self) -> AccountSnapshot:
         info = mt5.account_info()
@@ -50,6 +84,8 @@ class MT5Executor(LiveExchangeInterface):
         )
 
     def get_rates(self, symbol: str, timeframe: int, count: int = 300) -> pd.DataFrame:
+        if timeframe is None:
+            timeframe = mt5.TIMEFRAME_M5
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
         if rates is None or len(rates) == 0:
             return pd.DataFrame()
@@ -60,175 +96,41 @@ class MT5Executor(LiveExchangeInterface):
         return df
 
     def positions(self, symbol: Optional[str] = None):
-        return mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
-
-    def has_open_position(self, symbol: str) -> bool:
-        pos = self.positions(symbol=symbol)
-        return pos is not None and len(pos) > 0
-
-    def floating_pnl(self, symbol: Optional[str] = None) -> float:
-        pos = self.positions(symbol=symbol)
-        if pos is None:
-            return 0.0
-        return float(sum(p.profit for p in pos))
-
-    def connect(self) -> bool:
-        """Connect to MT5"""
-        try:
-            if not mt5.initialize():
-                error_msg = f"MT5 initialize failed: {mt5.last_error()}"
-                self.logger.error(error_msg)
-                raise RuntimeError(error_msg)
-            if not mt5.login(self.login, self.password, self.server):
-                err = mt5.last_error()
-                mt5.shutdown()
-                error_msg = f"MT5 login failed: {err}"
-                self.logger.error(error_msg)
-                raise RuntimeError(error_msg)
-            self.logger.info("MT5 connection established successfully")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to connect to MT5: {str(e)}")
-            return False
-
-    def shutdown(self) -> None:
-        """Shutdown MT5 connection"""
-        mt5.shutdown()
-        self.logger.info("MT5 connection shut down successfully")
-
-    def account_info(self) -> AccountSnapshot:
-        """Get account snapshot information"""
-        info = mt5.account_info()
-        if info is None:
-            error_msg = "MT5 account_info() returned None"
-            self.logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-        account_snapshot = AccountSnapshot(
-            balance=float(info.balance),
-            equity=float(info.equity),
-            margin=float(info.margin),
-            free_margin=float(info.margin_free),
-        )
-
-        self.logger.debug(f"Account info retrieved - Balance: {account_snapshot.balance}, Equity: {account_snapshot.equity}")
-        return account_snapshot
-
-    def get_rates(self, symbol: str, timeframe: int, count: int = 300) -> pd.DataFrame:
-        """Get market rates for a symbol and timeframe"""
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
-        if rates is None or len(rates) == 0:
-            self.logger.warning(f"No rates data returned for symbol {symbol} with timeframe {timeframe}")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(rates)
-        df["time"] = pd.to_datetime(df["time"], unit="s")
-        df.set_index("time", inplace=True)
-        df.sort_index(inplace=True)
-
-        self.logger.debug(f"Retrieved {len(df)} rates for symbol {symbol}")
-        return df
-
-    def positions(self, symbol: Optional[str] = None):
-        """Get open positions, optionally filtered by symbol"""
         pos = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
-        if pos is None:
-            pos = []
-
-        if symbol:
-            self.logger.debug(f"Retrieved {len(pos)} positions for symbol {symbol}")
-        else:
-            self.logger.debug(f"Retrieved {len(pos)} total positions")
-
-        return pos
+        return pos if pos is not None else []
 
     def floating_pnl(self, symbol: Optional[str] = None) -> float:
-        """Get floating PnL for a symbol or all positions"""
         pos = self.positions(symbol=symbol)
-        if pos is None:
-            self.logger.warning(f"No positions found for symbol {symbol}" if symbol else "No positions found")
-            return 0.0
-
-        total_pnl = float(sum(p.profit for p in pos))
-        if symbol:
-            self.logger.info(f"Floating PnL for {symbol}: {total_pnl}")
-        else:
-            self.logger.info(f"Total floating PnL: {total_pnl}")
-
-        return total_pnl
+        return float(sum(p.profit for p in pos)) if pos else 0.0
 
     def place_market_order(self, symbol: str, side: str, volume: float, sl: float, tp: float,
-                          comment: str = "TradePy Live") -> bool:
-        """
-        Place a market order with mandatory stop loss and take profit.
-        This is safe-by-default: both SL and TP are required.
-        """
-        # Validate inputs comprehensively
-        if sl is None or tp is None:
-            self.logger.error(f"Both stop loss and take profit are required for safe trading. Order rejected for {symbol}")
-            return False
+                          comment: str = "TradePy Live") -> OrderResult:
+        if not symbol or not symbol.strip():
+            return OrderResult(success=False, message="invalid_symbol")
 
-        # Validate side
+        if not mt5.symbol_select(symbol, True):
+            return OrderResult(success=False, message=f"symbol_select_failed: {mt5.last_error()}")
+
         side_upper = side.upper()
         if side_upper not in ["BUY", "SELL"]:
-            self.logger.error(f"Invalid side '{side}'. Must be 'BUY' or 'SELL'. Order rejected for {symbol}")
-            return False
+            return OrderResult(success=False, message="invalid_side")
 
-        # Validate volume
         if volume <= 0:
-            self.logger.error(f"Invalid volume {volume} for {symbol}. Must be greater than 0.")
-            return False
+            return OrderResult(success=False, message="invalid_volume")
 
-        # Validate symbol
-        if symbol is None or symbol.strip() == "":
-            self.logger.error(f"Invalid symbol. Cannot be None or empty.")
-            return False
+        if sl is None or tp is None or sl <= 0 or tp <= 0:
+            return OrderResult(success=False, message="invalid_sl_tp")
 
-        # Get tick data
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
-            self.logger.error(f"Could not get tick data for {symbol}")
-            return False
+            return OrderResult(success=False, message="missing_tick")
 
-        # Determine price and validate SL/TP consistency
         if side_upper == "BUY":
             order_type = mt5.ORDER_TYPE_BUY
             price = float(tick.ask)
-
-            # For BUY: SL should be below current price, TP should be above current price
-            # And SL should be below TP
-            if sl >= price:
-                self.logger.error(f"For BUY order, SL ({sl}) must be below current price ({price}). Order rejected for {symbol}")
-                return False
-            if tp <= price:
-                self.logger.error(f"For BUY order, TP ({tp}) must be above current price ({price}). Order rejected for {symbol}")
-                return False
-            if sl >= tp:
-                self.logger.error(f"For BUY order, SL ({sl}) must be below TP ({tp}). Order rejected for {symbol}")
-                return False
-        else:  # SELL
+        else:
             order_type = mt5.ORDER_TYPE_SELL
             price = float(tick.bid)
-
-            # For SELL: SL should be above current price, TP should be below current price
-            # And TP should be below SL
-            if sl <= price:
-                self.logger.error(f"For SELL order, SL ({sl}) must be above current price ({price}). Order rejected for {symbol}")
-                return False
-            if tp >= price:
-                self.logger.error(f"For SELL order, TP ({tp}) must be below current price ({price}). Order rejected for {symbol}")
-                return False
-            if tp >= sl:
-                self.logger.error(f"For SELL order, TP ({tp}) must be below SL ({sl}). Order rejected for {symbol}")
-                return False
-
-        # Validate SL and TP are positive
-        if sl <= 0:
-            self.logger.error(f"Stop loss ({sl}) must be positive. Order rejected for {symbol}")
-            return False
-        if tp <= 0:
-            self.logger.error(f"Take profit ({tp}) must be positive. Order rejected for {symbol}")
-            return False
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -238,20 +140,49 @@ class MT5Executor(LiveExchangeInterface):
             "price": price,
             "sl": float(sl),
             "tp": float(tp),
-            "deviation": 20,  # Default deviation
-            "magic": 234000,  # Default magic number
+            "deviation": 20,
+            "magic": 234000,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_FOK,
         }
 
+        if self.dry_run:
+            self.logger.info(f"MT5_DRY_RUN_ORDER_SIMULATED - {side_upper} {volume} {symbol} | SL: {sl} | TP: {tp} | Comment: {comment}")
+            return OrderResult(
+                success=True,
+                retcode=None,
+                order_id=None,
+                comment=comment,
+                request=request,
+                message="dry_run_simulated",
+            )
+
         result = mt5.order_send(request)
-        success = result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
+        if result is None:
+            self.logger.error(f"MT5_ORDER_FAILED - Symbol: {symbol} - Retcode: N/A - Comment: order_send returned None")
+            return OrderResult(success=False, retcode=None, comment="order_send returned None", request=request, message="order_send_none")
+
+        retcode = getattr(result, "retcode", None)
+        order_id = getattr(result, "order", None) or getattr(result, "ticket", None)
+        result_comment = getattr(result, "comment", "")
+        success = retcode == mt5.TRADE_RETCODE_DONE
 
         if success:
-            self.logger.info(f"MT5_ORDER_SENT - Ticket: {result.ticket} - {side} {volume} {symbol} | SL: {sl} | TP: {tp} | Retcode: {result.retcode}")
-            print(f"MT5_ORDER_SENT - Ticket: {result.ticket} - {side} {volume} {symbol} | SL: {sl} | TP: {tp}")
+            self.logger.info(
+                f"MT5_ORDER_SENT - Ticket: {order_id} - {side_upper} {volume} {symbol} | SL: {sl} | TP: {tp} | Retcode: {retcode}"
+            )
         else:
-            self.logger.error(f"MT5_ORDER_FAILED - Symbol: {symbol} - Retcode: {result.retcode if result else 'N/A'} - Comment: {comment}")
+            self.logger.error(
+                f"MT5_ORDER_FAILED - Symbol: {symbol} - Retcode: {retcode} - Comment: {result_comment}"
+            )
 
-        return success
+        return OrderResult(
+            success=success,
+            order_id=str(order_id) if order_id is not None else None,
+            retcode=retcode,
+            comment=result_comment or comment,
+            request=request,
+            message="order_sent" if success else "order_failed",
+            details={"result": result},
+        )

@@ -4,7 +4,7 @@ Broker implementation for exchange operations
 from .interface import ExchangeInterface
 import pandas as pd
 from typing import Optional
-from ..models import AccountSnapshot
+from ..models import AccountSnapshot, OrderResult
 import time
 
 
@@ -166,14 +166,14 @@ class Broker(ExchangeInterface):
         return total_pnl
 
     def place_market_order(self, symbol: str, side: str, volume: float, sl: float, tp: float, 
-                          comment: str = "TradePy Live") -> bool:
+                          comment: str = "TradePy Live") -> OrderResult:
         """Place a market order with mandatory stop loss and take profit"""
         
         # Anti-duplication: Check if we already have an open position for this symbol
         existing_positions = self.positions(symbol)
         if existing_positions:
             self.logger.warning(f"Not placing new order for {symbol}: already has {len(existing_positions)} open position(s)")
-            return False  # Reject order if position already exists for this symbol
+            return OrderResult(success=False, message="existing_position_blocked")
         
         # Anti-duplication: Check if we just placed an order for this symbol recently (same candle)
         current_time = pd.Timestamp.now()
@@ -182,24 +182,24 @@ class Broker(ExchangeInterface):
             # Prevent multiple orders on the same "bar" (using a small threshold like 10 seconds)
             if time_diff.total_seconds() < 10:
                 self.logger.warning(f"Not placing order for {symbol}: order already placed {time_diff.total_seconds():.1f}s ago")
-                return False
+                return OrderResult(success=False, message="duplicate_order_blocked")
         
         # Check if this is a dry run
         if self.dry_run:
             self.logger.info(f"DRY_RUN_ORDER_SIMULATED - {side.upper()} {volume} {symbol} | SL: {sl} | TP: {tp} | Comment: {comment}")
             print(f"DRY_RUN_ORDER_SIMULATED - {side.upper()} {volume} {symbol} | SL: {sl} | TP: {tp}")
-            return True  # Simulate successful order for dry run
+            return OrderResult(success=True, message="dry_run_simulated", comment=comment)
         
         # Get the current price as the entry price
         try:
             rates = self.get_rates(symbol, 5, 1)  # Get most recent bar
             if rates.empty:
                 self.logger.error(f"Could not get current price for {symbol} to determine entry price")
-                return False
+                return OrderResult(success=False, message="missing_price")
             entry_price = float(rates.iloc[-1]['close'])
         except Exception as e:
             self.logger.error(f"Error getting entry price for {symbol}: {str(e)}")
-            return False
+            return OrderResult(success=False, message=f"entry_price_error: {e}")
         
         # In simulation mode (not dry run but not real MT5), log SIM_ORDER_SENT
         self.logger.info(f"SIM_ORDER_SENT - {side.upper()} {volume} {symbol} | Entry: {entry_price} | SL: {sl} | TP: {tp} | Comment: {comment}")
@@ -241,7 +241,7 @@ class Broker(ExchangeInterface):
         # Update last order time for this symbol
         self._last_order_times[symbol] = current_time
         
-        return True  # Simulate successful order
+        return OrderResult(success=True, order_id=position_id, message="simulated_order", comment=comment)
 
     def get_historical_data(self, symbol: str, timeframe: str, start_date: str, end_date: str):
         """Get historical market data for backtesting"""

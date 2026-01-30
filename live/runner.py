@@ -29,6 +29,7 @@ class LiveRunner:
         self._available_symbols = []
         self._current_symbol = None
         self._last_closed_bar_times = {}  # Track last processed bar time per symbol
+        self._last_trade_bar_time = {}  # Track last bar where a trade was attempted per symbol
         self._startup_grace_period_active = True
         self._daily_start_equity = None
         self._daily_date = None
@@ -62,6 +63,13 @@ class LiveRunner:
             self._last_closed_bar_times[symbol] = closed_time
             return True
         return False
+
+    def _already_traded_on_bar(self, symbol: str, bar_time: pd.Timestamp) -> bool:
+        last_trade_time = self._last_trade_bar_time.get(symbol)
+        return last_trade_time is not None and bar_time <= last_trade_time
+
+    def _mark_traded_on_bar(self, symbol: str, bar_time: pd.Timestamp) -> None:
+        self._last_trade_bar_time[symbol] = bar_time
 
     def _log_decision_trace(self, now, current_day, symbol, df, is_new_closed_bar, signal, 
                            sl, tp, risk_allowed, risk_reason, kill_switch_triggered, 
@@ -376,6 +384,7 @@ class LiveRunner:
 
                     # Only act on new closed bar and after startup grace period
                     if is_new_closed_bar:
+                        closed_bar_time = df.index[-2]
                         # Disable startup grace period after first closed bar seen
                         if self._startup_grace_period_active:
                             self._startup_grace_period_active = False
@@ -446,20 +455,10 @@ class LiveRunner:
                             if self.risk_manager is not None and signal in ("BUY", "SELL"):
                                 try:
                                     if hasattr(self.risk_manager, 'allow_trade'):
-                                        risk_check = self.risk_manager.allow_trade(signal, sl, tp, snap)
-                                        
-                                        # Handle different return types: bool or (bool, reason)
-                                        if isinstance(risk_check, tuple) and len(risk_check) == 2:
-                                            risk_allowed, risk_reason = risk_check
-                                        elif isinstance(risk_check, bool):
-                                            risk_allowed = risk_check
-                                            risk_reason = "Risk manager check" if risk_check else "Risk manager blocked"
-                                        else:
-                                            risk_allowed = bool(risk_check)
-                                            risk_reason = "Risk manager check"
-                                            
-                                        if not risk_allowed:
-                                            risk_reason = risk_reason or "Risk manager blocked trade"
+                                        risk_allowed, risk_reason = self.risk_manager.allow_trade(signal, sl, tp, snap)
+                                        if not isinstance(risk_allowed, bool):
+                                            risk_allowed = bool(risk_allowed)
+                                            risk_reason = risk_reason or "Risk manager response normalized"
                                     else:
                                         risk_allowed = False
                                         risk_reason = "Risk manager missing allow_trade method"
@@ -489,32 +488,49 @@ class LiveRunner:
                                     risk_allowed = False
                                     self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | Reason: Invalid SL/TP values")
                                 elif risk_allowed and not kill_switch_triggered:
-                                    # All conditions met, try to place order
-                                    try:
-                                        ok = self.exchange.place_market_order(
-                                            symbol=symbol,
-                                            side=signal,
-                                            volume=volume,
-                                            sl=sl,
-                                            tp=tp,
-                                            comment="TradePy Live"
-                                        )
-                                        order_attempted = True
-                                        if ok:
-                                            signal_found = True  # Only process one signal per cycle
-                                            state = "order_sent"
-                                            order_result = "success"
-                                            self.logger.logger.info(f"ORDER_SENT - Symbol: {symbol} | {signal} {volume} | SL: {sl} | TP: {tp}")
-                                        else:
+                                    if self._already_traded_on_bar(symbol, closed_bar_time):
+                                        state = "risk_blocked"
+                                        order_result = "already_traded_on_bar"
+                                        self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | Reason: already traded on bar {closed_bar_time}")
+                                    else:
+                                        # All conditions met, try to place order
+                                        try:
+                                            self._mark_traded_on_bar(symbol, closed_bar_time)
+                                            ok = self.exchange.place_market_order(
+                                                symbol=symbol,
+                                                side=signal,
+                                                volume=volume,
+                                                sl=sl,
+                                                tp=tp,
+                                                comment="TradePy Live"
+                                            )
+                                            order_attempted = True
+                                            if hasattr(ok, "success"):
+                                                order_success = ok.success
+                                                order_id = ok.order_id
+                                                retcode = ok.retcode
+                                            else:
+                                                order_success = bool(ok)
+                                                order_id = None
+                                                retcode = None
+
+                                            if order_success:
+                                                signal_found = True  # Only process one signal per cycle
+                                                state = "order_sent"
+                                                order_result = "success"
+                                                extra = f" | OrderID: {order_id}" if order_id else ""
+                                                self.logger.logger.info(f"ORDER_SENT - Symbol: {symbol} | {signal} {volume} | SL: {sl} | TP: {tp}{extra}")
+                                            else:
+                                                state = "order_failed"
+                                                order_result = "failed_place_market_order"
+                                                extra = f" | Retcode: {retcode}" if retcode is not None else ""
+                                                self.logger.logger.error(f"ORDER_FAILED - Symbol: {symbol} | Could not place order{extra}")
+                                            break
+                                        except Exception as e:
+                                            order_attempted = True
                                             state = "order_failed"
-                                            order_result = "failed_place_market_order"
-                                            self.logger.logger.error(f"ORDER_FAILED - Symbol: {symbol} | Could not place order")
-                                        break
-                                    except Exception as e:
-                                        order_attempted = True
-                                        state = "order_failed"
-                                        order_result = f"exception: {str(e)}"
-                                        self.logger.logger.error(f"ORDER_ERROR - Symbol: {symbol} | Error: {e}")
+                                            order_result = f"exception: {str(e)}"
+                                            self.logger.logger.error(f"ORDER_ERROR - Symbol: {symbol} | Error: {e}")
                                 else:
                                     # Trade blocked by risk or kill switch
                                     order_attempted = False

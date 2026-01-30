@@ -24,9 +24,8 @@ class RiskManager:
     
     def allow_trade(self, signal, sl, tp, account_snapshot):
         """Check if a trade is allowed based on risk rules"""
-        # Default implementation allowing trade if no rules are configured
         if not self.rules:
-            return True
+            return True, "No risk rules configured"
         
         # Validate against all configured rules
         for rule in self.rules:

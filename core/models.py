@@ -32,5 +32,8 @@ class OrderResult:
     """Result of an order placement"""
     success: bool
     order_id: Optional[str] = None
+    retcode: Optional[int] = None
+    comment: str = ""
+    request: Optional[Dict[str, Any]] = None
     message: str = ""
     details: Optional[Dict[str, Any]] = None
