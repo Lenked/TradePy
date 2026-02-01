@@ -20,6 +20,17 @@ class MT5Executor(LiveExchangeInterface):
         self.account_mode = None
         self.logger = get_logger("MT5Executor")
 
+    def _resolve_symbol(self, symbol: str) -> Optional[str]:
+        if not symbol:
+            return None
+        if mt5.symbol_select(symbol, True):
+            return symbol
+        if not symbol.endswith("m"):
+            symbol_m = f"{symbol}m"
+            if mt5.symbol_select(symbol_m, True):
+                return symbol_m
+        return None
+
     def _detect_account_mode(self, account_info) -> str:
         server_lower = (self.server or "").lower()
         if any(key in server_lower for key in ["demo", "trial", "practice"]):
@@ -86,9 +97,9 @@ class MT5Executor(LiveExchangeInterface):
         self.logger.info("-" * 60)
         
         for symbol in common_symbols:
-            # Select the symbol first to ensure it's available
-            if mt5.symbol_select(symbol, True):
-                symbol_info = mt5.symbol_info(symbol)
+            resolved = self._resolve_symbol(symbol)
+            if resolved:
+                symbol_info = mt5.symbol_info(resolved)
                 if symbol_info is not None:
                     # Extract volume constraints
                     min_lot = symbol_info.volume_min
@@ -96,27 +107,11 @@ class MT5Executor(LiveExchangeInterface):
                     step = symbol_info.volume_step
                     contract_size = getattr(symbol_info, 'trade_contract_size', 'N/A')
                     
-                    self.logger.info(f"{symbol:<10} {min_lot:<10.2f} {max_lot:<12.2f} {step:<10.2f} {contract_size:<15}")
+                    self.logger.info(f"{resolved:<10} {min_lot:<10.2f} {max_lot:<12.2f} {step:<10.2f} {contract_size:<15}")
                 else:
-                    self.logger.info(f"{symbol:<10} {'N/A':<10} {'N/A':<12} {'N/A':<10} {'N/A':<15}")
+                    self.logger.info(f"{resolved:<10} {'N/A':<10} {'N/A':<12} {'N/A':<10} {'N/A':<15}")
             else:
-                # Try with different variations that might exist on Exness
-                variations = [f"Exness-{symbol}", f"{symbol}.m"]
-                found = False
-                for variant in variations:
-                    if mt5.symbol_select(variant, True):
-                        symbol_info = mt5.symbol_info(variant)
-                        if symbol_info is not None:
-                            min_lot = symbol_info.volume_min
-                            max_lot = symbol_info.volume_max
-                            step = symbol_info.volume_step
-                            contract_size = getattr(symbol_info, 'trade_contract_size', 'N/A')
-                            
-                            self.logger.info(f"{variant:<10} {min_lot:<10.2f} {max_lot:<12.2f} {step:<10.2f} {contract_size:<15}")
-                            found = True
-                            break
-                if not found:
-                    self.logger.info(f"{symbol:<10} {'Not Found':<10} {'Not Found':<12} {'Not Found':<10} {'Not Found':<15}")
+                self.logger.info(f"{symbol:<10} {'Not Found':<10} {'Not Found':<12} {'Not Found':<10} {'Not Found':<15}")
         
         self.logger.info("-" * 60)
         self.logger.info("Volume constraints will be automatically applied to all orders")
@@ -140,7 +135,10 @@ class MT5Executor(LiveExchangeInterface):
     def get_rates(self, symbol: str, timeframe: int, count: int = 300) -> pd.DataFrame:
         if timeframe is None:
             timeframe = mt5.TIMEFRAME_M5
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+        resolved = self._resolve_symbol(symbol)
+        if not resolved:
+            return pd.DataFrame()
+        rates = mt5.copy_rates_from_pos(resolved, timeframe, 0, count)
         if rates is None or len(rates) == 0:
             return pd.DataFrame()
         df = pd.DataFrame(rates)
@@ -150,7 +148,8 @@ class MT5Executor(LiveExchangeInterface):
         return df
 
     def positions(self, symbol: Optional[str] = None):
-        pos = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+        resolved = self._resolve_symbol(symbol) if symbol else None
+        pos = mt5.positions_get(symbol=resolved) if resolved else mt5.positions_get()
         return pos if pos is not None else []
 
     def floating_pnl(self, symbol: Optional[str] = None) -> float:
@@ -158,10 +157,12 @@ class MT5Executor(LiveExchangeInterface):
         return float(sum(p.profit for p in pos)) if pos else 0.0
 
     def get_tick(self, symbol: str):
-        return mt5.symbol_info_tick(symbol)
+        resolved = self._resolve_symbol(symbol)
+        return mt5.symbol_info_tick(resolved) if resolved else None
 
     def get_symbol_point(self, symbol: str) -> Optional[float]:
-        info = mt5.symbol_info(symbol)
+        resolved = self._resolve_symbol(symbol)
+        info = mt5.symbol_info(resolved) if resolved else None
         return float(info.point) if info and info.point else None
 
     def estimate_spread_points(self, symbol: str) -> Optional[float]:
@@ -255,14 +256,15 @@ class MT5Executor(LiveExchangeInterface):
             return OrderResult(success=False, message="invalid_symbol")
 
         # Ensure the symbol is selected
-        if not mt5.symbol_select(symbol, True):
+        resolved = self._resolve_symbol(symbol)
+        if not resolved:
             return OrderResult(success=False, message=f"symbol_select_failed: {mt5.last_error()}")
 
         # Get symbol info to normalize volume
-        symbol_info = mt5.symbol_info(symbol)
+        symbol_info = mt5.symbol_info(resolved)
         if symbol_info is None:
-            self.logger.error(f"MT5_SYMBOL_INFO_FAILED - Could not get symbol info for {symbol}")
-            return OrderResult(success=False, message=f"symbol_info_failed: {symbol}")
+            self.logger.error(f"MT5_SYMBOL_INFO_FAILED - Could not get symbol info for {resolved}")
+            return OrderResult(success=False, message=f"symbol_info_failed: {resolved}")
 
         side_upper = side.upper()
         if side_upper not in ["BUY", "SELL"]:
@@ -274,7 +276,7 @@ class MT5Executor(LiveExchangeInterface):
         if sl is None or tp is None or sl <= 0 or tp <= 0:
             return OrderResult(success=False, message="invalid_sl_tp")
 
-        tick = mt5.symbol_info_tick(symbol)
+        tick = mt5.symbol_info_tick(resolved)
         if tick is None:
             return OrderResult(success=False, message="missing_tick")
 
@@ -290,7 +292,7 @@ class MT5Executor(LiveExchangeInterface):
         
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
+            "symbol": resolved,
             "volume": float(normalized_volume),  # Use normalized volume here
             "type": order_type,
             "price": price,
@@ -304,7 +306,7 @@ class MT5Executor(LiveExchangeInterface):
         }
 
         if self.dry_run:
-            self.logger.info(f"MT5_DRY_RUN_ORDER_SIMULATED - {side_upper} {normalized_volume} {symbol} | SL: {sl} | TP: {tp} | Comment: {comment}")
+            self.logger.info(f"MT5_DRY_RUN_ORDER_SIMULATED - {side_upper} {normalized_volume} {resolved} | SL: {sl} | TP: {tp} | Comment: {comment}")
             return OrderResult(
                 success=True,
                 retcode=None,
@@ -316,7 +318,7 @@ class MT5Executor(LiveExchangeInterface):
 
         result = mt5.order_send(request)
         if result is None:
-            self.logger.error(f"MT5_ORDER_FAILED - Symbol: {symbol} - Retcode: N/A - Comment: order_send returned None")
+            self.logger.error(f"MT5_ORDER_FAILED - Symbol: {resolved} - Retcode: N/A - Comment: order_send returned None")
             return OrderResult(success=False, retcode=None, comment="order_send returned None", request=request, message="order_send_none")
 
         retcode = getattr(result, "retcode", None)
@@ -326,11 +328,11 @@ class MT5Executor(LiveExchangeInterface):
 
         if success:
             self.logger.info(
-                f"MT5_ORDER_SENT - Ticket: {order_id} - {side_upper} {normalized_volume} {symbol} | SL: {sl} | TP: {tp} | Retcode: {retcode}"
+                f"MT5_ORDER_SENT - Ticket: {order_id} - {side_upper} {normalized_volume} {resolved} | SL: {sl} | TP: {tp} | Retcode: {retcode}"
             )
         else:
             self.logger.error(
-                f"MT5_ORDER_FAILED - Symbol: {symbol} - Retcode: {retcode} - Comment: {result_comment}"
+                f"MT5_ORDER_FAILED - Symbol: {resolved} - Retcode: {retcode} - Comment: {result_comment}"
             )
 
         return OrderResult(

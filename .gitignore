@@ -8,6 +8,9 @@ env/
 artifacts/logs/*.log
 logs/
 
+# Reports 
+reports/
+
 # Python cache
 __pycache__/
 *.py[cod]

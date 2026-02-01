@@ -237,6 +237,19 @@ class LiveRunner:
 
         self._open_positions_snapshot = current
 
+    def _count_open_positions_for_symbol(self, positions, symbol: str) -> int:
+        if not positions or not symbol:
+            return 0
+        count = 0
+        for pos in positions:
+            if isinstance(pos, dict):
+                pos_symbol = pos.get("symbol")
+            else:
+                pos_symbol = getattr(pos, "symbol", None)
+            if pos_symbol == symbol:
+                count += 1
+        return count
+
     def run(self):
         """Run the live trading loop"""
         # Connect and perform startup check
@@ -349,9 +362,9 @@ class LiveRunner:
                 if self.risk_manager is not None:
                     self.risk_manager.update_daily(daily_pnl, daily_pnl_pct, datetime.now())
 
-                # Check if there are any open positions globally (max 1 trade constraint)
+                # Check open positions globally (for reporting only)
                 all_positions = self.exchange.positions()
-                has_open_positions_globally = all_positions is not None and len(all_positions) >= 1
+                global_open_positions = len(all_positions) if all_positions is not None else 0
                 self._sync_positions(all_positions)
 
                 # Iterate through available symbols to find trading opportunity
@@ -372,9 +385,8 @@ class LiveRunner:
                     # Check for new closed bar
                     is_new_closed_bar = self._is_new_closed_bar(df, symbol)
                     
-                    # Count open positions for this symbol
-                    position_for_symbol = self.exchange.positions(symbol=symbol)
-                    open_positions_count = len(position_for_symbol) if position_for_symbol else 0
+                    # Count open positions for this symbol using global snapshot
+                    open_positions_count = self._count_open_positions_for_symbol(all_positions, symbol)
                     
                     # Kill switch check (if provided) - per symbol
                     if self.kill_switch is not None:
@@ -394,13 +406,13 @@ class LiveRunner:
                             time.sleep(self.poll_seconds)
                             continue
 
-                    # Global position check: if any positions exist, don't enter new trades
-                    if has_open_positions_globally:
-                        self.logger.info(f"[{datetime.now().strftime('%A')}] {', '.join(self._available_symbols) if self._available_symbols else 'None'} | "
-                              f"Chosen: {self._current_symbol} | "
-                              f"HOLD (Global positions exist: {len(all_positions)}) | Bal={snap.balance:.2f} Eq={snap.equity:.2f} "
-                              f"Float={floating:.2f} DailyPnL={daily_pnl:.2f}")
-                        time.sleep(self.poll_seconds)
+                    # Symbol-level position check: block only if this symbol already has an open position
+                    if open_positions_count > 0:
+                        self.logger.info(
+                            f"[{datetime.now().strftime('%A')}] {symbol} | "
+                            f"HOLD (Position already open for symbol: {open_positions_count}) | "
+                            f"GlobalOpen={global_open_positions}"
+                        )
                         continue
 
                     # Default values for decision trace
@@ -654,7 +666,7 @@ class LiveRunner:
                         if symbol == self._available_symbols[0]:  # Only log once per cycle
                             # Use rate-limited logging for "waiting" messages to reduce noise
                             self.logger.info(f"[{datetime.now().strftime('%A')}] {', '.join(self._available_symbols)} | "
-                                  f"Chosen: {self._current_symbol} | Waiting for new bar | Bal={snap.balance:.2f} Eq={snap.equity:.2f} "
+                                  f"Scanning symbols (current={symbol}) | Waiting for new bar | Bal={snap.balance:.2f} Eq={snap.equity:.2f} "
                                   f"Float={floating:.2f} DailyPnL={daily_pnl:.2f}", key="waiting_for_bar")
 
                 time.sleep(self.poll_seconds)
