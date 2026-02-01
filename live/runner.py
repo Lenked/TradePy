@@ -10,6 +10,7 @@ import pandas as pd
 from core.utils.symbol_schedule import get_symbols_for_today
 from utils.logger import RateLimitedLogger
 from core.exchange.live_interface import LiveExchangeInterface
+from core.reporting.trade_reporter import TradeReporter
 
 
 class LiveRunner:
@@ -34,6 +35,9 @@ class LiveRunner:
         self._daily_start_equity = None
         self._daily_date = None
         self._last_decision_trace_time = {}  # Track when decision trace was last logged per symbol
+        self._open_positions_snapshot = {}
+        self._open_trades = {}
+        self._reporter = TradeReporter()
 
         # Initialize rate-limited logger to reduce "waiting for new bar" noise
         self.logger = RateLimitedLogger("LiveRunner", min_interval=60)  # Log every 60 seconds
@@ -173,12 +177,65 @@ class LiveRunner:
         if self._daily_date != today:
             self._daily_date = today
             self._daily_start_equity = equity
+            if self.risk_manager is not None:
+                self.risk_manager.on_new_day(today)
 
     def _get_available_symbols(self) -> list:
         """Get the list of available symbols based on auto mode or fixed symbol"""
         if self.symbol == "AUTO":
             return get_symbols_for_today()
         return [self.symbol] if self.symbol else []
+
+    def _normalize_position(self, pos):
+        if isinstance(pos, dict):
+            return {
+                "ticket": str(pos.get("ticket") or pos.get("id")),
+                "symbol": pos.get("symbol"),
+                "profit": float(pos.get("pnl", 0.0)),
+                "volume": float(pos.get("volume", 0.0)),
+                "side": pos.get("side"),
+                "open_time": pos.get("open_time"),
+            }
+        return {
+            "ticket": str(getattr(pos, "ticket", "")),
+            "symbol": getattr(pos, "symbol", None),
+            "profit": float(getattr(pos, "profit", 0.0)),
+            "volume": float(getattr(pos, "volume", 0.0)),
+            "side": "BUY" if getattr(pos, "type", 0) == 0 else "SELL",
+            "open_time": getattr(pos, "time", None),
+        }
+
+    def _sync_positions(self, positions):
+        current = {}
+        for pos in positions or []:
+            info = self._normalize_position(pos)
+            if info["ticket"]:
+                current[info["ticket"]] = info
+
+        closed_tickets = [t for t in self._open_positions_snapshot.keys() if t not in current]
+        for ticket in closed_tickets:
+            closed = self._open_positions_snapshot[ticket]
+            pnl = closed.get("profit", 0.0)
+            symbol = closed.get("symbol")
+            closed_at = datetime.now()
+
+            if self.risk_manager is not None:
+                self.risk_manager.record_trade_close(pnl, closed_at)
+
+            self._reporter.record_trade_close(
+                trade_id=ticket,
+                symbol=symbol,
+                side=closed.get("side"),
+                volume=closed.get("volume", 0.0),
+                open_time=closed.get("open_time"),
+                close_time=closed_at,
+                pnl=pnl,
+            )
+
+            if ticket in self._open_trades:
+                self._open_trades.pop(ticket, None)
+
+        self._open_positions_snapshot = current
 
     def run(self):
         """Run the live trading loop"""
@@ -273,6 +330,8 @@ class LiveRunner:
                 
                 # Check for date change (handles week transition even if symbols don't change)
                 if self._daily_date != current_date:
+                    if self._daily_date is not None:
+                        self._reporter.export_daily_report(self._daily_date)
                     old_symbols = self._available_symbols
                     new_symbols_for_date = self._get_available_symbols()
                     if new_symbols_for_date != self._available_symbols:
@@ -285,10 +344,15 @@ class LiveRunner:
                 # Sync account info
                 snap = self.exchange.account_info()
                 self._reset_daily_if_needed(snap.equity)
+                daily_pnl = (snap.equity - self._daily_start_equity) if self._daily_start_equity is not None else 0.0
+                daily_pnl_pct = (daily_pnl / self._daily_start_equity) if self._daily_start_equity else 0.0
+                if self.risk_manager is not None:
+                    self.risk_manager.update_daily(daily_pnl, daily_pnl_pct, datetime.now())
 
                 # Check if there are any open positions globally (max 1 trade constraint)
                 all_positions = self.exchange.positions()
                 has_open_positions_globally = all_positions is not None and len(all_positions) >= 1
+                self._sync_positions(all_positions)
 
                 # Iterate through available symbols to find trading opportunity
                 signal_found = False
@@ -455,7 +519,14 @@ class LiveRunner:
                             if self.risk_manager is not None and signal in ("BUY", "SELL"):
                                 try:
                                     if hasattr(self.risk_manager, 'allow_trade'):
-                                        risk_allowed, risk_reason = self.risk_manager.allow_trade(signal, sl, tp, snap)
+                                        risk_allowed, risk_reason = self.risk_manager.allow_trade(
+                                            signal, sl, tp, snap,
+                                            symbol=symbol,
+                                            df=df,
+                                            exchange=self.exchange,
+                                            now=datetime.now(),
+                                            open_positions_count=open_positions_count,
+                                        )
                                         if not isinstance(risk_allowed, bool):
                                             risk_allowed = bool(risk_allowed)
                                             risk_reason = risk_reason or "Risk manager response normalized"
@@ -520,6 +591,16 @@ class LiveRunner:
                                                 order_result = "success"
                                                 extra = f" | OrderID: {order_id}" if order_id else ""
                                                 self.logger.logger.info(f"ORDER_SENT - Symbol: {symbol} | {signal} {volume} | SL: {sl} | TP: {tp}{extra}")
+                                                trade_id = order_id or f"{symbol}_{int(time.time())}"
+                                                self._open_trades[trade_id] = {
+                                                    "trade_id": trade_id,
+                                                    "symbol": symbol,
+                                                    "side": signal,
+                                                    "volume": volume,
+                                                    "open_time": datetime.now(),
+                                                }
+                                            if self.risk_manager is not None:
+                                                self.risk_manager.record_trade_open(datetime.now(), symbol)
                                             else:
                                                 state = "order_failed"
                                                 order_result = "failed_place_market_order"
@@ -581,3 +662,5 @@ class LiveRunner:
         finally:
             if hasattr(self.exchange, 'shutdown'):
                 self.exchange.shutdown()
+            if self._daily_date is not None:
+                self._reporter.export_daily_report(self._daily_date)

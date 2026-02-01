@@ -157,6 +157,36 @@ class MT5Executor(LiveExchangeInterface):
         pos = self.positions(symbol=symbol)
         return float(sum(p.profit for p in pos)) if pos else 0.0
 
+    def get_tick(self, symbol: str):
+        return mt5.symbol_info_tick(symbol)
+
+    def get_symbol_point(self, symbol: str) -> Optional[float]:
+        info = mt5.symbol_info(symbol)
+        return float(info.point) if info and info.point else None
+
+    def estimate_spread_points(self, symbol: str) -> Optional[float]:
+        tick = self.get_tick(symbol)
+        point = self.get_symbol_point(symbol)
+        if tick is None or point is None or point == 0:
+            return None
+        return float((tick.ask - tick.bid) / point)
+
+    def estimate_slippage_points(self, symbol: str, reference_price: Optional[float], side: Optional[str] = None) -> Optional[float]:
+        if reference_price is None:
+            return None
+        tick = self.get_tick(symbol)
+        point = self.get_symbol_point(symbol)
+        if tick is None or point is None or point == 0:
+            return None
+        side_upper = (side or "").upper()
+        if side_upper == "BUY":
+            price = float(tick.ask)
+        elif side_upper == "SELL":
+            price = float(tick.bid)
+        else:
+            price = float((tick.ask + tick.bid) / 2.0)
+        return float(abs(price - reference_price) / point)
+
     def _normalize_volume(self, volume: float, symbol_info) -> float:
         """
         Normalize volume based on symbol's volume constraints.

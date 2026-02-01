@@ -165,6 +165,22 @@ class Broker(ExchangeInterface):
                 
         return total_pnl
 
+    def estimate_spread_points(self, symbol: str) -> Optional[float]:
+        return 0.0
+
+    def estimate_slippage_points(self, symbol: str, reference_price: Optional[float], side: Optional[str] = None) -> Optional[float]:
+        if reference_price is None:
+            return None
+        try:
+            rates = self.get_rates(symbol, 5, 1)
+            if rates.empty:
+                return None
+            current_price = float(rates.iloc[-1]['close'])
+        except Exception:
+            return None
+        point = 0.0001
+        return float(abs(current_price - reference_price) / point)
+
     def place_market_order(self, symbol: str, side: str, volume: float, sl: float, tp: float, 
                           comment: str = "TradePy Live") -> OrderResult:
         """Place a market order with mandatory stop loss and take profit"""

@@ -116,7 +116,7 @@ def main():
     
     # Initialize components
     strategy = TrendFollowingStrategy()
-    risk_manager = RiskManager()
+    risk_manager = RiskManager(config.get('risk', {}))
     
     if args.mode == 'backtest':
         engine = BacktestEngine(initial_capital=config.get('initial_capital', 10000))

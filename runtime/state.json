@@ -1,0 +1,12 @@
+{
+  "current_day": "2026-02-01",
+  "daily_pnl": 0.0,
+  "daily_pnl_pct": 0.0,
+  "trades_today": 0,
+  "consecutive_losses": 0,
+  "last_loss_time": null,
+  "traded_symbols_today": [],
+  "daily_realized_pnl": 0.0,
+  "profit_lock_active": false,
+  "profit_lock_until": null
+}
