@@ -29,3 +29,40 @@ def test_cooldown_after_loss_blocks_trade():
     allowed, reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=now + timedelta(minutes=30))
     assert allowed is False
     assert reason == "cooldown_after_loss"
+
+
+def test_global_open_positions_allows_other_symbol():
+    rm = RiskManager({"max_global_open_positions": 2, "max_open_trades_per_symbol": 1})
+    now = datetime(2026, 1, 30, 10, 0, 0)
+    allowed, reason = rm.allow_trade(
+        "BUY", 1.0, 2.0, None, now=now,
+        symbol="BTCUSDm",
+        symbol_open_positions_count=0,
+        global_open_positions_count=1,
+    )
+    assert allowed is True
+
+
+def test_global_open_positions_blocks_when_limit_reached():
+    rm = RiskManager({"max_global_open_positions": 1})
+    now = datetime(2026, 1, 30, 10, 0, 0)
+    allowed, reason = rm.allow_trade(
+        "BUY", 1.0, 2.0, None, now=now,
+        symbol="BTCUSDm",
+        symbol_open_positions_count=0,
+        global_open_positions_count=1,
+    )
+    assert allowed is False
+    assert reason == "blocked_by_max_global_open_positions"
+
+
+def test_global_open_active_ignores_inactive_symbol_positions():
+    rm = RiskManager({"max_global_open_positions": 1})
+    now = datetime(2026, 1, 30, 10, 0, 0)
+    allowed, reason = rm.allow_trade(
+        "BUY", 1.0, 2.0, None, now=now,
+        symbol="BTCUSDm",
+        symbol_open_positions_count=0,
+        global_open_positions_count=0,
+    )
+    assert allowed is True

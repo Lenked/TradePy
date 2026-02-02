@@ -22,6 +22,7 @@ class RiskManager:
         self.max_consecutive_losses = int(config.get("max_consecutive_losses", 3))
         self.max_trades_per_day = int(config.get("max_trades_per_day", 10))
         self.max_open_trades_per_symbol = int(config.get("max_open_trades_per_symbol", 1))
+        self.max_global_open_positions = config.get("max_global_open_positions", None)
         self.cooldown_minutes_after_loss = int(config.get("cooldown_minutes_after_loss", 45))
         self.max_spread_points = config.get("max_spread_points", None)
         self.max_slippage_points = config.get("max_slippage_points", None)
@@ -173,10 +174,15 @@ class RiskManager:
         now = context.get("now", datetime.now())
         self.on_new_day(self._get_trading_day(now))
 
-        open_positions_count = context.get("open_positions_count", 0)
+        symbol_open_positions_count = context.get("symbol_open_positions_count", 0)
+        global_open_positions_count = context.get("global_open_positions_count", None)
         symbol = context.get("symbol")
-        if self.max_open_trades_per_symbol and open_positions_count >= self.max_open_trades_per_symbol:
-            return False, "max_open_trades_per_symbol"
+        if self.max_open_trades_per_symbol and symbol_open_positions_count >= self.max_open_trades_per_symbol:
+            return False, "blocked_by_symbol_open_limit"
+
+        if self.max_global_open_positions is not None and global_open_positions_count is not None:
+            if int(global_open_positions_count) >= int(self.max_global_open_positions):
+                return False, "blocked_by_max_global_open_positions"
 
         if self.max_trades_per_day and self._trades_today >= self.max_trades_per_day:
             return False, "max_trades_per_day"
