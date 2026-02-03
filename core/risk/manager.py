@@ -1,7 +1,7 @@
 """
 Risk management for TradePy bot
 """
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Dict
 from datetime import datetime, date, timedelta, time as dt_time
 import json
 import os
@@ -22,10 +22,12 @@ class RiskManager:
         self.max_consecutive_losses = int(config.get("max_consecutive_losses", 3))
         self.max_trades_per_day = int(config.get("max_trades_per_day", 10))
         self.max_open_trades_per_symbol = int(config.get("max_open_trades_per_symbol", 1))
+        self.max_global_open_positions = config.get("max_global_open_positions", None)
         self.cooldown_minutes_after_loss = int(config.get("cooldown_minutes_after_loss", 45))
         self.max_spread_points = config.get("max_spread_points", None)
         self.max_slippage_points = config.get("max_slippage_points", None)
         self.one_trade_per_symbol_per_day = bool(config.get("one_trade_per_symbol_per_day", False))
+        self.cooldown_minutes_after_trade_per_symbol = int(config.get("cooldown_minutes_after_trade_per_symbol", 0))
         self.daily_profit_target_usd = float(config.get("daily_profit_target_usd", 0.0))
         self.profit_lock_mode = str(config.get("profit_lock_mode", "until_next_day"))
         self.profit_lock_hours = int(config.get("profit_lock_hours", 6))
@@ -43,6 +45,7 @@ class RiskManager:
         self._daily_realized_pnl = 0.0
         self._profit_lock_active = False
         self._profit_lock_until: Optional[datetime] = None
+        self._last_trade_time_by_symbol: Dict[str, datetime] = {}
 
         self._load_state()
         
@@ -94,6 +97,7 @@ class RiskManager:
             "daily_realized_pnl": self._daily_realized_pnl,
             "profit_lock_active": self._profit_lock_active,
             "profit_lock_until": self._profit_lock_until.isoformat() if self._profit_lock_until else None,
+            "last_trade_time_by_symbol": {k: v.isoformat() for k, v in self._last_trade_time_by_symbol.items()},
         }
         with open(self.state_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=True, indent=2)
@@ -117,6 +121,10 @@ class RiskManager:
             self._profit_lock_active = bool(data.get("profit_lock_active", False))
             profit_lock_until = data.get("profit_lock_until")
             self._profit_lock_until = datetime.fromisoformat(profit_lock_until) if profit_lock_until else None
+            last_trade_time_by_symbol = data.get("last_trade_time_by_symbol", {})
+            self._last_trade_time_by_symbol = {
+                k: datetime.fromisoformat(v) for k, v in last_trade_time_by_symbol.items()
+            }
         except Exception:
             return
 
@@ -132,6 +140,7 @@ class RiskManager:
             self._daily_realized_pnl = 0.0
             self._profit_lock_active = False
             self._profit_lock_until = None
+            self._last_trade_time_by_symbol = {}
             self._save_state()
 
     def update_daily(self, daily_pnl: float, daily_pnl_pct: float, now: datetime):
@@ -145,6 +154,7 @@ class RiskManager:
         self._trades_today += 1
         if symbol:
             self._traded_symbols_today.add(symbol)
+            self._last_trade_time_by_symbol[symbol] = opened_at
         self._save_state()
 
     def record_trade_close(self, pnl: float, closed_at: datetime):
@@ -173,10 +183,21 @@ class RiskManager:
         now = context.get("now", datetime.now())
         self.on_new_day(self._get_trading_day(now))
 
-        open_positions_count = context.get("open_positions_count", 0)
+        symbol_open_positions_count = context.get("symbol_open_positions_count", 0)
+        global_open_positions_count = context.get("global_open_positions_count", None)
         symbol = context.get("symbol")
-        if self.max_open_trades_per_symbol and open_positions_count >= self.max_open_trades_per_symbol:
-            return False, "max_open_trades_per_symbol"
+        if self.cooldown_minutes_after_trade_per_symbol > 0 and symbol:
+            last_trade_time = self._last_trade_time_by_symbol.get(symbol)
+            if last_trade_time is not None:
+                cooldown_until = last_trade_time + timedelta(minutes=self.cooldown_minutes_after_trade_per_symbol)
+                if now < cooldown_until:
+                    return False, "symbol_trade_cooldown"
+        if self.max_open_trades_per_symbol and symbol_open_positions_count >= self.max_open_trades_per_symbol:
+            return False, "blocked_by_symbol_open_limit"
+
+        if self.max_global_open_positions is not None and global_open_positions_count is not None:
+            if int(global_open_positions_count) >= int(self.max_global_open_positions):
+                return False, "blocked_by_max_global_open_positions"
 
         if self.max_trades_per_day and self._trades_today >= self.max_trades_per_day:
             return False, "max_trades_per_day"
@@ -246,4 +267,5 @@ class RiskManager:
             "daily_realized_pnl": self._daily_realized_pnl,
             "profit_lock_active": self._profit_lock_active,
             "profit_lock_until": self._profit_lock_until,
+            "last_trade_time_by_symbol": self._last_trade_time_by_symbol,
         }

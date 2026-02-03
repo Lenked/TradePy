@@ -78,7 +78,8 @@ class LiveRunner:
     def _log_decision_trace(self, now, current_day, symbol, df, is_new_closed_bar, signal, 
                            sl, tp, risk_allowed, risk_reason, kill_switch_triggered, 
                            kill_switch_reason, dry_run, order_attempted, order_result, 
-                           open_positions_count, state=None):
+                           open_positions_count, global_open_positions_count=None,
+                           chosen_symbol=None, reason=None, state=None):
         """Log decision trace once per minute per symbol to avoid spam"""
         current_time = now.timestamp()
         trace_key = f"decision_trace_{symbol}"
@@ -116,11 +117,13 @@ class LiveRunner:
             
             self.logger.logger.info(
                 f"DECISION_TRACE - now={now.strftime('%H:%M:%S')} | "
-                f"day={current_day} | chosen_symbol={symbol} | "
+                f"day={current_day} | symbol={symbol} | chosen_symbol={chosen_symbol} | "
                 f"rates_len={rates_len} | "
                 f"last_closed_bar_time={last_closed_bar_time} | "
                 f"is_new_bar={is_new_closed_bar} | "
                 f"state={state} | "
+                f"global_open={global_open_positions_count} | symbol_open={open_positions_count} | "
+                f"reason={reason} | "
                 f"startup_grace_remaining={self._startup_grace_period_active} | "
                 f"open_positions_count={open_positions_count} | "
                 f"signal={signal} | "
@@ -237,9 +240,11 @@ class LiveRunner:
 
         self._open_positions_snapshot = current
 
-    def _count_open_positions_for_symbol(self, positions, symbol: str) -> int:
-        if not positions or not symbol:
+    def _count_open_positions(self, positions, symbol: str = None) -> int:
+        if not positions:
             return 0
+        if symbol is None:
+            return len(positions)
         count = 0
         for pos in positions:
             if isinstance(pos, dict):
@@ -293,13 +298,6 @@ class LiveRunner:
         self._available_symbols = self._get_available_symbols()
         if self._available_symbols:
             self._current_symbol = self._available_symbols[0]
-
-        # Get initial market data to set up startup grace period
-        if self._current_symbol:
-            df = self.exchange.get_rates(self._current_symbol, self.timeframe, count=300)
-            if df is not None and not df.empty and len(df) >= 3:
-                # Store the last closed bar time for startup grace period
-                self._last_closed_bar_times[self._current_symbol] = df.index[-2]
 
         # Get initial market data to set up startup grace period
         if self._current_symbol:
@@ -364,11 +362,15 @@ class LiveRunner:
 
                 # Check open positions globally (for reporting only)
                 all_positions = self.exchange.positions()
-                global_open_positions = len(all_positions) if all_positions is not None else 0
                 self._sync_positions(all_positions)
 
                 # Iterate through available symbols to find trading opportunity
                 signal_found = False
+                active_symbol_set = set(self._available_symbols or [])
+                for pos in all_positions or []:
+                    pos_symbol = pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", None)
+                    if pos_symbol and pos_symbol not in active_symbol_set:
+                        self.logger.info(f"IGNORED_INACTIVE_POSITION - {pos_symbol} open but market inactive today")
                 for symbol in self._available_symbols:
                     if signal_found:
                         break  # Only process one signal per cycle
@@ -386,7 +388,11 @@ class LiveRunner:
                     is_new_closed_bar = self._is_new_closed_bar(df, symbol)
                     
                     # Count open positions for this symbol using global snapshot
-                    open_positions_count = self._count_open_positions_for_symbol(all_positions, symbol)
+                    open_positions_count = self._count_open_positions(all_positions, symbol)
+                    global_open_positions_active = 0
+                    if self._available_symbols:
+                        for active_symbol in self._available_symbols:
+                            global_open_positions_active += self._count_open_positions(all_positions, active_symbol)
                     
                     # Kill switch check (if provided) - per symbol
                     if self.kill_switch is not None:
@@ -411,7 +417,7 @@ class LiveRunner:
                         self.logger.info(
                             f"[{datetime.now().strftime('%A')}] {symbol} | "
                             f"HOLD (Position already open for symbol: {open_positions_count}) | "
-                            f"GlobalOpen={global_open_positions}"
+                            f"GlobalOpen={global_open_positions_active}"
                         )
                         continue
 
@@ -455,7 +461,7 @@ class LiveRunner:
                         signal, sl, tp, risk_allowed, risk_reason, 
                         kill_switch_triggered, kill_switch_reason, 
                         dry_run, False, order_result, 
-                        open_positions_count, state
+                        open_positions_count, global_open_positions_active, symbol, "waiting_new_bar_for_symbol", state
                     )
 
                     # Only act on new closed bar and after startup grace period
@@ -537,7 +543,8 @@ class LiveRunner:
                                             df=df,
                                             exchange=self.exchange,
                                             now=datetime.now(),
-                                            open_positions_count=open_positions_count,
+                                            symbol_open_positions_count=open_positions_count,
+                                            global_open_positions_count=global_open_positions_active,
                                         )
                                         if not isinstance(risk_allowed, bool):
                                             risk_allowed = bool(risk_allowed)
@@ -611,8 +618,8 @@ class LiveRunner:
                                                     "volume": volume,
                                                     "open_time": datetime.now(),
                                                 }
-                                            if self.risk_manager is not None:
-                                                self.risk_manager.record_trade_open(datetime.now(), symbol)
+                                                if self.risk_manager is not None:
+                                                    self.risk_manager.record_trade_open(datetime.now(), symbol)
                                             else:
                                                 state = "order_failed"
                                                 order_result = "failed_place_market_order"
@@ -654,7 +661,7 @@ class LiveRunner:
                                 signal, sl, tp, risk_allowed, risk_reason, 
                                 kill_switch_triggered, kill_switch_reason, 
                                 dry_run, order_attempted, order_result, 
-                                open_positions_count, state
+                                open_positions_count, global_open_positions_active, symbol, risk_reason, state
                             )
                             
                             # In DEBUG mode, show the last 3 candles and EMA values
