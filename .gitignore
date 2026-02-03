@@ -58,6 +58,7 @@ data/*.json
 data/*.xlsx
 data/*.h5
 data/*.pickle
+runtime/state.json
 
 # Configuration
 config/*.yaml
