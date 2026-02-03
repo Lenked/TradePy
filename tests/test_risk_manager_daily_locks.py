@@ -50,3 +50,20 @@ def test_daily_profit_lock_blocks_until_unlock(tmp_path):
     assert reason == "daily_profit_lock"
     allowed2, reason2 = rm.allow_trade("BUY", 1.0, 2.0, None, now=now + timedelta(hours=7), symbol="EURUSDm")
     assert allowed2 is True
+
+
+def test_symbol_trade_cooldown_blocks_same_symbol(tmp_path):
+    state_path = tmp_path / "state.json"
+    rm = RiskManager({
+        "cooldown_minutes_after_trade_per_symbol": 120,
+        "state_path": str(state_path),
+        "trading_timezone": "UTC",
+        "daily_reset_hour": 0,
+    })
+    opened_at = datetime(2026, 1, 30, 10, 0, 0)
+    rm.record_trade_open(opened_at, "BTCUSDm")
+    allowed_early, reason_early = rm.allow_trade("BUY", 1.0, 2.0, None, now=opened_at + timedelta(minutes=30), symbol="BTCUSDm")
+    assert allowed_early is False
+    assert reason_early == "symbol_trade_cooldown"
+    allowed_late, _ = rm.allow_trade("BUY", 1.0, 2.0, None, now=opened_at + timedelta(minutes=121), symbol="BTCUSDm")
+    assert allowed_late is True
