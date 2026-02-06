@@ -24,10 +24,40 @@ class RiskManager:
         self.max_open_trades_per_symbol = int(config.get("max_open_trades_per_symbol", 1))
         self.max_global_open_positions = config.get("max_global_open_positions", None)
         self.cooldown_minutes_after_loss = int(config.get("cooldown_minutes_after_loss", 45))
+        
+        # New global cooldown option and overrides
+        self.global_cooldown_minutes_after_loss = int(config.get("global_cooldown_minutes_after_loss", 0))
+        self.cooldown_overrides_by_symbol = config.get("cooldown_overrides_by_symbol", {})
+        
+        # Handle both legacy and new config formats for spread/slippage
+        # Legacy: max_spread_points_default, max_slippage_points_default
+        # New: max_spread_points, max_slippage_points with max_spread_points_by_symbol, max_slippage_points_by_symbol
         self.max_spread_points_default = config.get("max_spread_points_default", config.get("max_spread_points", None))
         self.max_slippage_points_default = config.get("max_slippage_points_default", config.get("max_slippage_points", None))
-        self.max_spread_points_by_symbol = config.get("max_spread_points_by_symbol", {})
-        self.max_slippage_points_by_symbol = config.get("max_slippage_points_by_symbol", {})
+        
+        # Handle both the legacy format and the new nested format for per-symbol configs
+        # Support legacy "max_spread_points_by_symbol": {"BTCUSDm": 80, ...} format directly
+        if "max_spread_points_by_symbol" in config:
+            max_spread_points_by_symbol = config["max_spread_points_by_symbol"]
+            if isinstance(max_spread_points_by_symbol, dict):
+                self.max_spread_points_by_symbol = max_spread_points_by_symbol
+            else:
+                self.max_spread_points_by_symbol = {}
+        else:
+            self.max_spread_points_by_symbol = {}
+        
+        if "max_slippage_points_by_symbol" in config:
+            max_slippage_points_by_symbol = config["max_slippage_points_by_symbol"]
+            if isinstance(max_slippage_points_by_symbol, dict):
+                self.max_slippage_points_by_symbol = max_slippage_points_by_symbol
+            else:
+                self.max_slippage_points_by_symbol = {}
+        else:
+            self.max_slippage_points_by_symbol = {}
+        
+        # Store the full position sizing config for use in volume calculations
+        self.position_sizing_config = config.get("position_sizing", {})
+        
         self.one_trade_per_symbol_per_day = bool(config.get("one_trade_per_symbol_per_day", False))
         self.cooldown_minutes_after_trade_per_symbol = int(config.get("cooldown_minutes_after_trade_per_symbol", 0))
         self.daily_profit_target_usd = float(config.get("daily_profit_target_usd", 0.0))
@@ -42,7 +72,8 @@ class RiskManager:
         self._daily_pnl_pct = 0.0
         self._trades_today = 0
         self._consecutive_losses = 0
-        self._last_loss_time: Optional[datetime] = None
+        self._last_loss_time: Optional[datetime] = None  # Kept for global cooldown
+        self._last_loss_time_by_symbol: Dict[str, datetime] = {}  # Per-symbol cooldown
         self._traded_symbols_today: Set[str] = set()
         self._daily_realized_pnl = 0.0
         self._profit_lock_active = False
@@ -99,6 +130,7 @@ class RiskManager:
             "trades_today": self._trades_today,
             "consecutive_losses": self._consecutive_losses,
             "last_loss_time": self._last_loss_time.isoformat() if self._last_loss_time else None,
+            "last_loss_time_by_symbol": {k: v.isoformat() for k, v in self._last_loss_time_by_symbol.items()},
             "traded_symbols_today": sorted(self._traded_symbols_today),
             "daily_realized_pnl": self._daily_realized_pnl,
             "profit_lock_active": self._profit_lock_active,
@@ -122,6 +154,10 @@ class RiskManager:
             self._consecutive_losses = int(data.get("consecutive_losses", 0))
             last_loss_time = data.get("last_loss_time")
             self._last_loss_time = datetime.fromisoformat(last_loss_time) if last_loss_time else None
+            last_loss_time_by_symbol = data.get("last_loss_time_by_symbol", {})
+            self._last_loss_time_by_symbol = {
+                k: datetime.fromisoformat(v) for k, v in last_loss_time_by_symbol.items()
+            }
             self._traded_symbols_today = set(data.get("traded_symbols_today", []))
             self._daily_realized_pnl = float(data.get("daily_realized_pnl", 0.0))
             self._profit_lock_active = bool(data.get("profit_lock_active", False))
@@ -163,14 +199,18 @@ class RiskManager:
             self._last_trade_time_by_symbol[symbol] = opened_at
         self._save_state()
 
-    def record_trade_close(self, pnl: float, closed_at: datetime):
+    def record_trade_close(self, pnl: float, closed_at: datetime, symbol: Optional[str] = None):
         self.on_new_day(self._get_trading_day(closed_at))
         self._daily_realized_pnl += float(pnl)
         if pnl < 0:
             self._consecutive_losses += 1
-            self._last_loss_time = closed_at
+            self._last_loss_time = closed_at  # Global loss time
+            if symbol:
+                self._last_loss_time_by_symbol[symbol] = closed_at  # Per-symbol loss time
         else:
             self._consecutive_losses = 0
+            # Reset per-symbol loss time only if we want to
+            # For now, we only set it on loss, so no need to reset
         if self.daily_profit_target_usd and self._daily_realized_pnl >= self.daily_profit_target_usd:
             self._profit_lock_active = True
             if self.profit_lock_mode == "cooldown_hours":
@@ -231,10 +271,26 @@ class RiskManager:
         if self.max_consecutive_losses and self._consecutive_losses >= self.max_consecutive_losses:
             return False, "max_consecutive_losses"
 
-        if self.cooldown_minutes_after_loss and self._last_loss_time is not None:
-            cooldown_until = self._last_loss_time + timedelta(minutes=self.cooldown_minutes_after_loss)
-            if now < cooldown_until:
-                return False, "cooldown_after_loss"
+        if self.cooldown_minutes_after_loss and symbol:
+            # Check per-symbol cooldown after loss with potential override
+            symbol_cooldown_minutes = self.cooldown_overrides_by_symbol.get(symbol, self.cooldown_minutes_after_loss)
+            last_loss_time = self._last_loss_time_by_symbol.get(symbol)
+            if last_loss_time is not None:
+                cooldown_until = last_loss_time + timedelta(minutes=symbol_cooldown_minutes)
+                if now < cooldown_until:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"RISK_COOLDOWN - {symbol} blocked ({symbol_cooldown_minutes}m) last_loss={last_loss_time}")
+                    return False, "symbol_cooldown_after_loss"
+
+        # Check global cooldown after loss (optional)
+        if self.global_cooldown_minutes_after_loss and self._last_loss_time is not None:
+            global_cooldown_until = self._last_loss_time + timedelta(minutes=self.global_cooldown_minutes_after_loss)
+            if now < global_cooldown_until:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"RISK_COOLDOWN - {symbol} blocked by global cooldown ({self.global_cooldown_minutes_after_loss}m) last_loss={self._last_loss_time}")
+                return False, "global_cooldown_after_loss"
 
         exchange = context.get("exchange")
         df = context.get("df")
@@ -245,14 +301,16 @@ class RiskManager:
         if exchange is not None and symbol:
             # Use symbol-specific spread threshold with fallback to default
             if self.max_spread_points_default is not None or self.max_spread_points_by_symbol:
+                # Use symbol-specific threshold if available, otherwise use default
                 spread_threshold = self.max_spread_points_by_symbol.get(symbol, self.max_spread_points_default)
                 if spread_threshold is not None and hasattr(exchange, "estimate_spread_points"):
                     spread_points = exchange.estimate_spread_points(symbol)
                     if spread_points is not None:
                         if spread_points > float(spread_threshold):
                             import logging
-                            logging.getLogger(__name__).info(
-                                f"RISK_CHECK - symbol={symbol} spread={spread_points} max={spread_threshold} result=BLOCKED"
+                            logger = logging.getLogger(__name__)
+                            logger.info(
+                                f"RISK_FILTER - {symbol} blocked by spread={spread_points} > limit={spread_threshold}"
                             )
                             return False, "max_spread_points"
                         else:
@@ -263,14 +321,16 @@ class RiskManager:
 
             # Use symbol-specific slippage threshold with fallback to default
             if self.max_slippage_points_default is not None or self.max_slippage_points_by_symbol:
+                # Use symbol-specific threshold if available, otherwise use default
                 slippage_threshold = self.max_slippage_points_by_symbol.get(symbol, self.max_slippage_points_default)
                 if slippage_threshold is not None and hasattr(exchange, "estimate_slippage_points"):
                     slippage_points = exchange.estimate_slippage_points(symbol, reference_price, signal)
                     if slippage_points is not None:
                         if slippage_points > float(slippage_threshold):
                             import logging
-                            logging.getLogger(__name__).info(
-                                f"RISK_CHECK - symbol={symbol} slippage={slippage_points} max={slippage_threshold} result=BLOCKED"
+                            logger = logging.getLogger(__name__)
+                            logger.info(
+                                f"RISK_FILTER - {symbol} blocked by slippage={slippage_points} > limit={slippage_threshold}"
                             )
                             return False, "max_slippage_points"
                         else:

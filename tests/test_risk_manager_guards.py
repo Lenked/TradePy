@@ -15,9 +15,9 @@ def test_daily_loss_blocks_trade():
 def test_consecutive_losses_block_trade():
     rm = RiskManager({"max_consecutive_losses": 2})
     now = datetime(2026, 1, 30, 10, 0, 0)
-    rm.record_trade_close(-10, now)
-    rm.record_trade_close(-5, now + timedelta(minutes=1))
-    allowed, reason = rm.allow_trade("SELL", 1.0, 2.0, None, now=now)
+    rm.record_trade_close(-10, now, "TESTSYM")
+    rm.record_trade_close(-5, now + timedelta(minutes=1), "TESTSYM")
+    allowed, reason = rm.allow_trade("SELL", 1.0, 2.0, None, now=now, symbol="TESTSYM")
     assert allowed is False
     assert reason == "max_consecutive_losses"
 
@@ -25,10 +25,10 @@ def test_consecutive_losses_block_trade():
 def test_cooldown_after_loss_blocks_trade():
     rm = RiskManager({"cooldown_minutes_after_loss": 45})
     now = datetime(2026, 1, 30, 10, 0, 0)
-    rm.record_trade_close(-10, now)
-    allowed, reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=now + timedelta(minutes=30))
+    rm.record_trade_close(-10, now, "TESTSYM")
+    allowed, reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=now + timedelta(minutes=30), symbol="TESTSYM")
     assert allowed is False
-    assert reason == "cooldown_after_loss"
+    assert reason == "symbol_cooldown_after_loss"
 
 
 def test_global_open_positions_allows_other_symbol():

@@ -223,7 +223,7 @@ class LiveRunner:
             closed_at = datetime.now()
 
             if self.risk_manager is not None:
-                self.risk_manager.record_trade_close(pnl, closed_at)
+                self.risk_manager.record_trade_close(pnl, closed_at, symbol)
 
             self._reporter.record_trade_close(
                 trade_id=ticket,
@@ -540,6 +540,39 @@ class LiveRunner:
                                 try:
                                     if hasattr(self.strategy, 'compute_volume'):
                                         volume = self.strategy.compute_volume(df, signal, snap.equity)
+                                        
+                                        # Apply volume multiplier based on symbol if RiskManager has position sizing config
+                                        if self.risk_manager is not None and hasattr(self.risk_manager, 'position_sizing_config'):
+                                            position_sizing_config = self.risk_manager.position_sizing_config
+                                            per_symbol_config = position_sizing_config.get('per_symbol', {})
+                                            multiplier = per_symbol_config.get(symbol, {}).get('multiplier', 1.0)
+                                            
+                                            # Get max lot from config - default to 0.05 for safety
+                                            max_lot = position_sizing_config.get('max_lot', 0.05)
+                                            
+                                            if multiplier != 1.0:
+                                                base_volume = volume
+                                                volume = volume * multiplier
+                                                
+                                                # Respect MT5 lot size constraints
+                                                try:
+                                                    min_lot = getattr(self.exchange, 'min_lot_size', 0.01)
+                                                    lot_step = getattr(self.exchange, 'lot_step_size', 0.01)
+                                                    # Align volume to MT5 requirements
+                                                    if lot_step > 0:
+                                                        volume = round(volume / lot_step) * lot_step
+                                                except:
+                                                    min_lot = 0.01
+                                                    lot_step = 0.01
+                                                    
+                                                # Apply max lot restriction from config
+                                                volume = min(volume, max_lot)
+                                                volume = max(min_lot, volume)  # Ensure minimum volume
+                                                
+                                                # Log the volume adjustment for transparency
+                                                import logging
+                                                logger = logging.getLogger(__name__)
+                                                logger.info(f"VOLUME_MULTIPLIER - {symbol} base={base_volume:.4f} -> final={volume:.4f} multiplier={multiplier}")
                                     else:
                                         self.logger.logger.warning(f"Strategy missing compute_volume method for {symbol}")
                                         volume = 0.1  # Default small volume

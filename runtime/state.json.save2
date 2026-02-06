@@ -1,0 +1,17 @@
+{
+  "current_day": "2026-01-30",
+  "daily_pnl": 0.0,
+  "daily_pnl_pct": 0.0,
+  "trades_today": 0,
+  "consecutive_losses": 5,
+  "last_loss_time": "2026-01-30T10:00:00",
+  "last_loss_time_by_symbol": {
+    "XAUUSDm": "2026-01-30T10:00:00",
+    "BTCUSDm": "2026-01-30T10:00:00"
+  },
+  "traded_symbols_today": [],
+  "daily_realized_pnl": -50.0,
+  "profit_lock_active": false,
+  "profit_lock_until": null,
+  "last_trade_time_by_symbol": {}
+}
