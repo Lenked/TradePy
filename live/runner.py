@@ -479,9 +479,23 @@ class LiveRunner:
                             # Generate signal
                             try:
                                 signal = self.strategy.generate_signal(df)  # expects BUY/SELL/HOLD
+                                
+                                # Check for hold reason if strategy supports it
+                                hold_reason_msg = ""
+                                if signal == "HOLD":
+                                    if hasattr(self.strategy, 'hold_reason'):
+                                        try:
+                                            reason = self.strategy.hold_reason(df)
+                                            if reason:
+                                                hold_reason_msg = f" ({reason})"
+                                        except Exception as e:
+                                            hold_reason_msg = f" (error getting reason: {e})"
+                                    else:
+                                        hold_reason_msg = " (no entry conditions met)"
                             except AttributeError:
                                 self.logger.logger.warning(f"Strategy missing generate_signal method, defaulting to HOLD")
                                 signal = "HOLD"
+                                hold_reason_msg = " (missing generate_signal method)"
                             
                             # Default values
                             sl, tp, volume = None, None, 0
@@ -653,6 +667,7 @@ class LiveRunner:
                                 state = "hold_signal"
                                 order_result = "hold_signal"
                                 order_attempted = False
+                                self.logger.logger.debug(f"HOLD reason - Symbol: {symbol} | HOLD signal{hold_reason_msg}")
                                 self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | Reason: HOLD signal")
                             
                             # After processing, log the complete decision trace with updated values

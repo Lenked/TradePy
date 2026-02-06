@@ -1,14 +1,19 @@
 {
-  "current_day": "2026-02-03",
-  "daily_pnl": 0.4399999999999409,
-  "daily_pnl_pct": 0.0006955641974136724,
-  "trades_today": 1,
+  "current_day": "2026-02-06",
+  "daily_pnl": 2.6100000000000136,
+  "daily_pnl_pct": 0.004223164298890026,
+  "trades_today": 7,
   "consecutive_losses": 0,
-  "last_loss_time": null,
+  "last_loss_time": "2026-02-06T11:06:32.562534",
   "traded_symbols_today": [
+    "EURUSDm",
     "USOILm"
   ],
-  "daily_realized_pnl": 0.0,
+  "daily_realized_pnl": 2.2099999999999995,
   "profit_lock_active": false,
-  "profit_lock_until": null
+  "profit_lock_until": null,
+  "last_trade_time_by_symbol": {
+    "USOILm": "2026-02-06T10:15:03.721827",
+    "EURUSDm": "2026-02-06T14:35:05.157939"
+  }
 }

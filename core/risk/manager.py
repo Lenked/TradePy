@@ -24,8 +24,10 @@ class RiskManager:
         self.max_open_trades_per_symbol = int(config.get("max_open_trades_per_symbol", 1))
         self.max_global_open_positions = config.get("max_global_open_positions", None)
         self.cooldown_minutes_after_loss = int(config.get("cooldown_minutes_after_loss", 45))
-        self.max_spread_points = config.get("max_spread_points", None)
-        self.max_slippage_points = config.get("max_slippage_points", None)
+        self.max_spread_points_default = config.get("max_spread_points_default", config.get("max_spread_points", None))
+        self.max_slippage_points_default = config.get("max_slippage_points_default", config.get("max_slippage_points", None))
+        self.max_spread_points_by_symbol = config.get("max_spread_points_by_symbol", {})
+        self.max_slippage_points_by_symbol = config.get("max_slippage_points_by_symbol", {})
         self.one_trade_per_symbol_per_day = bool(config.get("one_trade_per_symbol_per_day", False))
         self.cooldown_minutes_after_trade_per_symbol = int(config.get("cooldown_minutes_after_trade_per_symbol", 0))
         self.daily_profit_target_usd = float(config.get("daily_profit_target_usd", 0.0))
@@ -69,6 +71,10 @@ class RiskManager:
             return None
 
     def _get_trading_day(self, now: datetime) -> date:
+        if now is None:
+            from datetime import datetime
+            now = datetime.now()
+            
         tz = self._get_tz()
         if tz is not None and now.tzinfo is None:
             now = now.replace(tzinfo=tz)
@@ -180,8 +186,15 @@ class RiskManager:
 
     def allow_trade(self, signal, sl, tp, account_snapshot, **context):
         """Check if a trade is allowed based on risk rules and global guard rails"""
-        now = context.get("now", datetime.now())
-        self.on_new_day(self._get_trading_day(now))
+        now_param = context.get("now")
+        if now_param is None:
+            from datetime import datetime
+            now_param = datetime.now()
+        
+        self.on_new_day(self._get_trading_day(now_param))
+        
+        # Use the datetime value for comparisons below
+        now = now_param
 
         symbol_open_positions_count = context.get("symbol_open_positions_count", 0)
         global_open_positions_count = context.get("global_open_positions_count", None)
@@ -230,15 +243,41 @@ class RiskManager:
             reference_price = float(df["close"].iloc[-2])
 
         if exchange is not None and symbol:
-            if self.max_spread_points is not None and hasattr(exchange, "estimate_spread_points"):
-                spread_points = exchange.estimate_spread_points(symbol)
-                if spread_points is not None and spread_points > float(self.max_spread_points):
-                    return False, "max_spread_points"
+            # Use symbol-specific spread threshold with fallback to default
+            if self.max_spread_points_default is not None or self.max_spread_points_by_symbol:
+                spread_threshold = self.max_spread_points_by_symbol.get(symbol, self.max_spread_points_default)
+                if spread_threshold is not None and hasattr(exchange, "estimate_spread_points"):
+                    spread_points = exchange.estimate_spread_points(symbol)
+                    if spread_points is not None:
+                        if spread_points > float(spread_threshold):
+                            import logging
+                            logging.getLogger(__name__).info(
+                                f"RISK_CHECK - symbol={symbol} spread={spread_points} max={spread_threshold} result=BLOCKED"
+                            )
+                            return False, "max_spread_points"
+                        else:
+                            import logging
+                            logging.getLogger(__name__).info(
+                                f"RISK_CHECK - symbol={symbol} spread={spread_points} max={spread_threshold} result=ALLOWED"
+                            )
 
-            if self.max_slippage_points is not None and hasattr(exchange, "estimate_slippage_points"):
-                slippage_points = exchange.estimate_slippage_points(symbol, reference_price, signal)
-                if slippage_points is not None and slippage_points > float(self.max_slippage_points):
-                    return False, "max_slippage_points"
+            # Use symbol-specific slippage threshold with fallback to default
+            if self.max_slippage_points_default is not None or self.max_slippage_points_by_symbol:
+                slippage_threshold = self.max_slippage_points_by_symbol.get(symbol, self.max_slippage_points_default)
+                if slippage_threshold is not None and hasattr(exchange, "estimate_slippage_points"):
+                    slippage_points = exchange.estimate_slippage_points(symbol, reference_price, signal)
+                    if slippage_points is not None:
+                        if slippage_points > float(slippage_threshold):
+                            import logging
+                            logging.getLogger(__name__).info(
+                                f"RISK_CHECK - symbol={symbol} slippage={slippage_points} max={slippage_threshold} result=BLOCKED"
+                            )
+                            return False, "max_slippage_points"
+                        else:
+                            import logging
+                            logging.getLogger(__name__).info(
+                                f"RISK_CHECK - symbol={symbol} slippage={slippage_points} max={slippage_threshold} result=ALLOWED"
+                            )
 
         if not self.rules:
             return True, "No risk rules configured"
