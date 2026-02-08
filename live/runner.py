@@ -17,7 +17,8 @@ class LiveRunner:
     """Main runner for live trading"""
 
     def __init__(self, strategy, exchange: LiveExchangeInterface, risk_manager=None, kill_switch=None,
-                 symbol: str = "AUTO", timeframe=None, poll_seconds: int = 5):
+                 symbol: str = "AUTO", timeframe=None, timeframes=None, preferred_timeframe=None,
+                 poll_seconds: int = 5):
         self.strategy = strategy
         self.exchange = exchange
         self.risk_manager = risk_manager
@@ -25,16 +26,18 @@ class LiveRunner:
 
         self.symbol = symbol  # "AUTO" or specific symbol
         self.timeframe = timeframe
+        self.timeframes = self._normalize_timeframes(timeframes, timeframe)
+        self.preferred_timeframe_key = preferred_timeframe
         self.poll_seconds = poll_seconds
 
         self._available_symbols = []
         self._current_symbol = None
-        self._last_closed_bar_times = {}  # Track last processed bar time per symbol
+        self._last_closed_bar_times = {}  # Track last processed bar time per symbol/timeframe
         self._last_trade_bar_time = {}  # Track last bar where a trade was attempted per symbol
         self._startup_grace_period_active = True
         self._daily_start_equity = None
         self._daily_date = None
-        self._last_decision_trace_time = {}  # Track when decision trace was last logged per symbol
+        self._last_decision_trace_time = {}  # Track when decision trace was last logged per symbol/timeframe
         self._open_positions_snapshot = {}
         self._open_trades = {}
         self._reporter = TradeReporter()
@@ -55,16 +58,37 @@ class LiveRunner:
         log_level = log_levels.get(log_level_str, logging.INFO)
         self.logger.logger.set_level(log_level)
 
-    def _is_new_closed_bar(self, df: pd.DataFrame, symbol: str) -> bool:
-        """Check if there's a new closed bar for the specific symbol"""
+    def _normalize_timeframes(self, timeframes, fallback_timeframe):
+        if timeframes:
+            normalized = []
+            for item in timeframes:
+                if isinstance(item, dict):
+                    key = item.get("key") or item.get("label") or str(item.get("value"))
+                    value = item.get("value")
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    key, value = item[0], item[1]
+                else:
+                    key, value = None, item
+                if value is None:
+                    continue
+                normalized.append({"key": key, "value": value})
+            if normalized:
+                return normalized
+        if fallback_timeframe is None:
+            return []
+        return [{"key": None, "value": fallback_timeframe}]
+
+    def _is_new_closed_bar(self, df: pd.DataFrame, symbol: str, timeframe_key: str = None) -> bool:
+        """Check if there's a new closed bar for the specific symbol/timeframe"""
         if df is None or df.empty or len(df) < 3:
             return False
         
         closed_time = df.index[-2]  # last CLOSED candle
-        last_processed_time = self._last_closed_bar_times.get(symbol)
+        bar_key = (symbol, timeframe_key or "default")
+        last_processed_time = self._last_closed_bar_times.get(bar_key)
         
         if last_processed_time is None or closed_time > last_processed_time:
-            self._last_closed_bar_times[symbol] = closed_time
+            self._last_closed_bar_times[bar_key] = closed_time
             return True
         return False
 
@@ -79,10 +103,10 @@ class LiveRunner:
                            sl, tp, risk_allowed, risk_reason, kill_switch_triggered, 
                            kill_switch_reason, dry_run, order_attempted, order_result, 
                            open_positions_count, global_open_positions_count=None,
-                           chosen_symbol=None, reason=None, state=None):
+                           chosen_symbol=None, reason=None, state=None, timeframe_key=None):
         """Log decision trace once per minute per symbol to avoid spam"""
         current_time = now.timestamp()
-        trace_key = f"decision_trace_{symbol}"
+        trace_key = f"decision_trace_{symbol}_{timeframe_key or 'default'}"
         
         # Log decision trace once per minute per symbol
         if (trace_key not in self._last_decision_trace_time or 
@@ -118,6 +142,7 @@ class LiveRunner:
             self.logger.logger.info(
                 f"DECISION_TRACE - now={now.strftime('%H:%M:%S')} | "
                 f"day={current_day} | symbol={symbol} | chosen_symbol={chosen_symbol} | "
+                f"tf={timeframe_key or 'default'} | "
                 f"rates_len={rates_len} | "
                 f"last_closed_bar_time={last_closed_bar_time} | "
                 f"is_new_bar={is_new_closed_bar} | "
@@ -174,6 +199,28 @@ class LiveRunner:
             except Exception as e:
                 if hasattr(self.logger.logger, 'logger'):
                     self.logger.logger.logger.debug(f"DEBUG_INFO - Error showing debug info for {symbol}: {e}")
+
+    def _select_preferred_candidate(self, candidates):
+        if not candidates:
+            return None
+        if self.preferred_timeframe_key:
+            preferred = next((c for c in candidates if c.get("tf_key") == self.preferred_timeframe_key), None)
+            if preferred:
+                return preferred
+        return candidates[0]
+
+    def _resolve_timeframe_signal(self, candidates):
+        actionable = [c for c in candidates if c.get("signal") in ("BUY", "SELL")]
+        if not actionable:
+            return None, "no_actionable_signal"
+        directions = {c.get("signal") for c in actionable}
+        if len(directions) > 1:
+            preferred = self._select_preferred_candidate(actionable)
+            if preferred and self.preferred_timeframe_key:
+                return preferred, "conflict_prefer_timeframe"
+            return None, "timeframe_conflict"
+        preferred = self._select_preferred_candidate(actionable)
+        return preferred or actionable[0], "signal_selected"
 
     def _reset_daily_if_needed(self, equity: float):
         today = datetime.now().date()
@@ -301,10 +348,17 @@ class LiveRunner:
 
         # Get initial market data to set up startup grace period
         if self._current_symbol:
-            df = self.exchange.get_rates(self._current_symbol, self.timeframe, count=300)
-            if df is not None and not df.empty and len(df) >= 3:
-                # Store the last closed bar time for startup grace period
-                self._last_closed_bar_times[self._current_symbol] = df.index[-2]
+            timeframes = self.timeframes if self.timeframes else [{"key": None, "value": self.timeframe}]
+            for tf in timeframes:
+                tf_key = tf.get("key")
+                tf_value = tf.get("value")
+                if tf_value is None:
+                    continue
+                df = self.exchange.get_rates(self._current_symbol, tf_value, count=300)
+                if df is not None and not df.empty and len(df) >= 3:
+                    # Store the last closed bar time for startup grace period
+                    bar_key = (self._current_symbol, tf_key or "default")
+                    self._last_closed_bar_times[bar_key] = df.index[-2]
 
         try:
             while True:
@@ -379,13 +433,36 @@ class LiveRunner:
                     floating = self.exchange.floating_pnl(symbol=symbol) if symbol else 0.0
                     daily_pnl = (snap.equity - self._daily_start_equity) if self._daily_start_equity is not None else 0.0
 
-                    # Get market data for current symbol
-                    df = self.exchange.get_rates(symbol, self.timeframe, count=300)
-                    if df is None or df.empty:
+                    # Collect market data across configured timeframes
+                    timeframes = self.timeframes if self.timeframes else [{"key": None, "value": self.timeframe}]
+                    tf_data = []
+                    for tf in timeframes:
+                        tf_key = tf.get("key")
+                        tf_value = tf.get("value")
+                        if tf_value is None:
+                            continue
+                        df = self.exchange.get_rates(symbol, tf_value, count=300)
+                        if df is None or df.empty:
+                            continue
+                        is_new = self._is_new_closed_bar(df, symbol, tf_key)
+                        tf_data.append({
+                            "tf_key": tf_key,
+                            "tf_value": tf_value,
+                            "df": df,
+                            "is_new": is_new,
+                            "closed_bar_time": df.index[-2] if len(df) >= 2 else None,
+                        })
+
+                    if not tf_data:
                         continue
 
-                    # Check for new closed bar
-                    is_new_closed_bar = self._is_new_closed_bar(df, symbol)
+                    new_bar_candidates = [c for c in tf_data if c["is_new"]]
+                    has_new_bar = bool(new_bar_candidates)
+                    trace_pool = new_bar_candidates if has_new_bar else tf_data
+                    trace_candidate = self._select_preferred_candidate(trace_pool)
+                    df = trace_candidate["df"]
+                    is_new_closed_bar = trace_candidate["is_new"]
+                    timeframe_key = trace_candidate["tf_key"]
                     
                     # Count open positions for this symbol using global snapshot
                     open_positions_count = self._count_open_positions(all_positions, symbol)
@@ -449,9 +526,9 @@ class LiveRunner:
                             kill_switch_reason = decision.get("reason", "Unknown reason")
                     
                     # Generate decision trace once per minute per symbol (with default values when no new bar)
-                    if is_new_closed_bar:
+                    if has_new_bar:
                         state = "evaluating"
-                        order_result = "no_trade_conditions_not_met"
+                        order_result = "evaluating_new_bar"
                     else:
                         state = "waiting_new_bar"
                         order_result = "waiting_for_new_bar"
@@ -461,12 +538,12 @@ class LiveRunner:
                         signal, sl, tp, risk_allowed, risk_reason, 
                         kill_switch_triggered, kill_switch_reason, 
                         dry_run, False, order_result, 
-                        open_positions_count, global_open_positions_active, symbol, "waiting_new_bar_for_symbol", state
+                        open_positions_count, global_open_positions_active, symbol, "waiting_new_bar_for_symbol", state,
+                        timeframe_key=timeframe_key
                     )
 
-                    # Only act on new closed bar and after startup grace period
-                    if is_new_closed_bar:
-                        closed_bar_time = df.index[-2]
+                    # Only act on new closed bar (any timeframe) and after startup grace period
+                    if has_new_bar:
                         # Disable startup grace period after first closed bar seen
                         if self._startup_grace_period_active:
                             self._startup_grace_period_active = False
@@ -475,14 +552,31 @@ class LiveRunner:
                         # Generate signal only after startup grace period
                         if not self._startup_grace_period_active:
                             self._current_symbol = symbol
+                            hold_reason_msg = ""
+                            selected_reason = "signal_selected"
                             
-                            # Generate signal
-                            try:
-                                signal = self.strategy.generate_signal(df)  # expects BUY/SELL/HOLD
-                                
-                                # Check for hold reason if strategy supports it
-                                hold_reason_msg = ""
-                                if signal == "HOLD":
+                            # Generate signal per timeframe (new bars only)
+                            for candidate in new_bar_candidates:
+                                try:
+                                    candidate["signal"] = self.strategy.generate_signal(candidate["df"])
+                                except AttributeError:
+                                    self.logger.logger.warning("Strategy missing generate_signal method, defaulting to HOLD")
+                                    candidate["signal"] = "HOLD"
+                                except Exception as e:
+                                    self.logger.logger.warning(f"Strategy signal error for {symbol}: {e}")
+                                    candidate["signal"] = "HOLD"
+
+                            chosen_candidate, selected_reason = self._resolve_timeframe_signal(new_bar_candidates)
+                            if chosen_candidate is None:
+                                # No actionable signal or conflict
+                                hold_candidate = self._select_preferred_candidate(new_bar_candidates)
+                                if hold_candidate:
+                                    df = hold_candidate["df"]
+                                    timeframe_key = hold_candidate["tf_key"]
+                                signal = "HOLD"
+                                if selected_reason == "timeframe_conflict":
+                                    hold_reason_msg = f" (timeframe conflict, prefer {self.preferred_timeframe_key or 'none'})"
+                                else:
                                     if hasattr(self.strategy, 'hold_reason'):
                                         try:
                                             reason = self.strategy.hold_reason(df)
@@ -492,11 +586,39 @@ class LiveRunner:
                                             hold_reason_msg = f" (error getting reason: {e})"
                                     else:
                                         hold_reason_msg = " (no entry conditions met)"
-                            except AttributeError:
-                                self.logger.logger.warning(f"Strategy missing generate_signal method, defaulting to HOLD")
-                                signal = "HOLD"
-                                hold_reason_msg = " (missing generate_signal method)"
-                            
+
+                                self.logger.logger.info(
+                                    f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | "
+                                    f"Reason: {selected_reason}{hold_reason_msg}"
+                                )
+                                self._log_decision_trace(
+                                    datetime.now(), current_day, symbol, df, True,
+                                    signal, sl, tp, risk_allowed, selected_reason,
+                                    kill_switch_triggered, kill_switch_reason,
+                                    dry_run, False, selected_reason,
+                                    open_positions_count, global_open_positions_active, symbol, selected_reason, "hold_signal",
+                                    timeframe_key=timeframe_key
+                                )
+                                continue
+
+                            # Use chosen timeframe for trading logic
+                            df = chosen_candidate["df"]
+                            timeframe_key = chosen_candidate["tf_key"]
+                            signal = chosen_candidate.get("signal", "HOLD")
+                            closed_bar_time = chosen_candidate.get("closed_bar_time")
+
+                            # Check for hold reason if strategy supports it
+                            if signal == "HOLD":
+                                if hasattr(self.strategy, 'hold_reason'):
+                                    try:
+                                        reason = self.strategy.hold_reason(df)
+                                        if reason:
+                                            hold_reason_msg = f" ({reason})"
+                                    except Exception as e:
+                                        hold_reason_msg = f" (error getting reason: {e})"
+                                else:
+                                    hold_reason_msg = " (no entry conditions met)"
+
                             # Default values
                             sl, tp, volume = None, None, 0
                             sl_valid, tp_valid = False, False
@@ -617,18 +739,18 @@ class LiveRunner:
                                     order_result = "missing_strategy_method"
                                     risk_reason = "missing_strategy_method"
                                     risk_allowed = False
-                                    self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | Reason: Missing strategy methods")
+                                    self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Reason: Missing strategy methods")
                                 elif not sl_tp_ok:
                                     state = "risk_blocked"
                                     order_result = "invalid_sl_tp"
                                     risk_reason = "invalid_sl_tp"
                                     risk_allowed = False
-                                    self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | Reason: Invalid SL/TP values")
+                                    self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Reason: Invalid SL/TP values")
                                 elif risk_allowed and not kill_switch_triggered:
                                     if self._already_traded_on_bar(symbol, closed_bar_time):
                                         state = "risk_blocked"
                                         order_result = "already_traded_on_bar"
-                                        self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | Reason: already traded on bar {closed_bar_time}")
+                                        self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Reason: already traded on bar {closed_bar_time}")
                                     else:
                                         # All conditions met, try to place order
                                         try:
@@ -656,7 +778,7 @@ class LiveRunner:
                                                 state = "order_sent"
                                                 order_result = "success"
                                                 extra = f" | OrderID: {order_id}" if order_id else ""
-                                                self.logger.logger.info(f"ORDER_SENT - Symbol: {symbol} | {signal} {volume} | SL: {sl} | TP: {tp}{extra}")
+                                                self.logger.logger.info(f"ORDER_SENT - Symbol: {symbol} | TF: {timeframe_key or 'default'} | {signal} {volume} | SL: {sl} | TP: {tp}{extra}")
                                                 trade_id = order_id or f"{symbol}_{int(time.time())}"
                                                 self._open_trades[trade_id] = {
                                                     "trade_id": trade_id,
@@ -671,13 +793,13 @@ class LiveRunner:
                                                 state = "order_failed"
                                                 order_result = "failed_place_market_order"
                                                 extra = f" | Retcode: {retcode}" if retcode is not None else ""
-                                                self.logger.logger.error(f"ORDER_FAILED - Symbol: {symbol} | Could not place order{extra}")
+                                                self.logger.logger.error(f"ORDER_FAILED - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Could not place order{extra}")
                                             break
                                         except Exception as e:
                                             order_attempted = True
                                             state = "order_failed"
                                             order_result = f"exception: {str(e)}"
-                                            self.logger.logger.error(f"ORDER_ERROR - Symbol: {symbol} | Error: {e}")
+                                            self.logger.logger.error(f"ORDER_ERROR - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Error: {e}")
                                 else:
                                     # Trade blocked by risk or kill switch
                                     order_attempted = False
@@ -694,14 +816,14 @@ class LiveRunner:
                                         
                                     state = "risk_blocked" if not risk_allowed else "kill_switch"
                                     reason_str = '; '.join(reason_parts) if reason_parts else 'conditions not met'
-                                    self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | Reason: {reason_str}")
+                                    self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Reason: {reason_str}")
                             else:
                                 # Hold signal
                                 state = "hold_signal"
                                 order_result = "hold_signal"
                                 order_attempted = False
-                                self.logger.logger.debug(f"HOLD reason - Symbol: {symbol} | HOLD signal{hold_reason_msg}")
-                                self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | Reason: HOLD signal")
+                                self.logger.logger.debug(f"HOLD reason - Symbol: {symbol} | TF: {timeframe_key or 'default'} | HOLD signal{hold_reason_msg}")
+                                self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Reason: HOLD signal")
                             
                             # After processing, log the complete decision trace with updated values
                             self._log_decision_trace(
@@ -709,7 +831,8 @@ class LiveRunner:
                                 signal, sl, tp, risk_allowed, risk_reason, 
                                 kill_switch_triggered, kill_switch_reason, 
                                 dry_run, order_attempted, order_result, 
-                                open_positions_count, global_open_positions_active, symbol, risk_reason, state
+                                open_positions_count, global_open_positions_active, symbol, risk_reason, state,
+                                timeframe_key=timeframe_key
                             )
                             
                             # In DEBUG mode, show the last 3 candles and EMA values

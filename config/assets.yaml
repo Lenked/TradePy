@@ -1,0 +1,9 @@
+# Assets settings
+symbols:
+  - "BTC/USDT"
+  - "ETH/USDT"
+  - "SOL/USDT"
+allowed_exchanges:
+  - "binance"
+  - "bybit"
+  - "kraken"

@@ -22,8 +22,10 @@ class RiskManager:
         self.max_consecutive_losses = int(config.get("max_consecutive_losses", 3))
         self.max_trades_per_day = int(config.get("max_trades_per_day", 10))
         self.max_open_trades_per_symbol = int(config.get("max_open_trades_per_symbol", 1))
+        self.max_open_trades_per_symbol_by_symbol = config.get("max_open_trades_per_symbol_by_symbol", {})
         self.max_global_open_positions = config.get("max_global_open_positions", None)
         self.cooldown_minutes_after_loss = int(config.get("cooldown_minutes_after_loss", 45))
+        self.cooldown_after_trade_overrides_by_symbol = config.get("cooldown_after_trade_overrides_by_symbol", {})
         
         # New global cooldown option and overrides
         self.global_cooldown_minutes_after_loss = int(config.get("global_cooldown_minutes_after_loss", 0))
@@ -239,13 +241,24 @@ class RiskManager:
         symbol_open_positions_count = context.get("symbol_open_positions_count", 0)
         global_open_positions_count = context.get("global_open_positions_count", None)
         symbol = context.get("symbol")
-        if self.cooldown_minutes_after_trade_per_symbol > 0 and symbol:
-            last_trade_time = self._last_trade_time_by_symbol.get(symbol)
-            if last_trade_time is not None:
-                cooldown_until = last_trade_time + timedelta(minutes=self.cooldown_minutes_after_trade_per_symbol)
-                if now < cooldown_until:
-                    return False, "symbol_trade_cooldown"
-        if self.max_open_trades_per_symbol and symbol_open_positions_count >= self.max_open_trades_per_symbol:
+        if symbol:
+            cooldown_after_trade = self.cooldown_minutes_after_trade_per_symbol
+            if isinstance(self.cooldown_after_trade_overrides_by_symbol, dict):
+                override = self.cooldown_after_trade_overrides_by_symbol.get(symbol)
+                if override is not None:
+                    cooldown_after_trade = int(override)
+            if cooldown_after_trade > 0:
+                last_trade_time = self._last_trade_time_by_symbol.get(symbol)
+                if last_trade_time is not None:
+                    cooldown_until = last_trade_time + timedelta(minutes=cooldown_after_trade)
+                    if now < cooldown_until:
+                        return False, "symbol_trade_cooldown"
+        max_open_trades_for_symbol = self.max_open_trades_per_symbol
+        if symbol and isinstance(self.max_open_trades_per_symbol_by_symbol, dict):
+            override = self.max_open_trades_per_symbol_by_symbol.get(symbol)
+            if override is not None:
+                max_open_trades_for_symbol = int(override)
+        if max_open_trades_for_symbol and symbol_open_positions_count >= max_open_trades_for_symbol:
             return False, "blocked_by_symbol_open_limit"
 
         if self.max_global_open_positions is not None and global_open_positions_count is not None:

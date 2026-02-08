@@ -124,27 +124,109 @@ def main():
         print("Running backtest...")
     elif args.mode in ['paper', 'live']:
         timeframe = trading_config.get('timeframe')
+        timeframes_config = trading_config.get('timeframes', None)
+        preferred_timeframe_cfg = trading_config.get('preferred_timeframe', None)
         poll_seconds = trading_config.get('poll_seconds', 5)
+
+        def _as_list(value):
+            if value is None:
+                return []
+            if isinstance(value, (list, tuple)):
+                return list(value)
+            return [value]
+
+        def _normalize_timeframe_key(value):
+            if value is None:
+                return None
+            if isinstance(value, int):
+                mapping = {
+                    1: "M1",
+                    5: "M5",
+                    15: "M15",
+                    30: "M30",
+                    60: "H1",
+                    240: "H4",
+                    1440: "D1",
+                }
+                return mapping.get(value, f"M{value}")
+            if isinstance(value, str):
+                v = value.strip().upper()
+                if v.isdigit():
+                    return _normalize_timeframe_key(int(v))
+                if v in ("D1", "1D", "D"):
+                    return "D1"
+                if v.startswith("M") and v[1:].isdigit():
+                    return f"M{int(v[1:])}"
+                if v.startswith("H") and v[1:].isdigit():
+                    return f"H{int(v[1:])}"
+            return None
+
+        def _minutes_from_key(key):
+            mapping = {
+                "M1": 1,
+                "M5": 5,
+                "M15": 15,
+                "M30": 30,
+                "H1": 60,
+                "H4": 240,
+                "D1": 1440,
+            }
+            return mapping.get(key)
+
+        timeframes_list = _as_list(timeframes_config if timeframes_config is not None else timeframe)
+        preferred_timeframe_key = _normalize_timeframe_key(preferred_timeframe_cfg) if preferred_timeframe_cfg else None
+
+        timeframes_meta = []
         if use_mt5:
             try:
                 import MetaTrader5 as mt5
-                mt5_timeframes = {
-                    1: mt5.TIMEFRAME_M1,
-                    5: mt5.TIMEFRAME_M5,
-                    15: mt5.TIMEFRAME_M15,
-                    30: mt5.TIMEFRAME_M30,
-                    60: mt5.TIMEFRAME_H1,
-                    240: mt5.TIMEFRAME_H4,
-                    1440: mt5.TIMEFRAME_D1,
+                mt5_timeframes_by_key = {
+                    "M1": mt5.TIMEFRAME_M1,
+                    "M5": mt5.TIMEFRAME_M5,
+                    "M15": mt5.TIMEFRAME_M15,
+                    "M30": mt5.TIMEFRAME_M30,
+                    "H1": mt5.TIMEFRAME_H1,
+                    "H4": mt5.TIMEFRAME_H4,
+                    "D1": mt5.TIMEFRAME_D1,
                 }
-                if isinstance(timeframe, int):
-                    timeframe = mt5_timeframes.get(timeframe, mt5.TIMEFRAME_M5)
-                elif timeframe is None:
-                    timeframe = mt5.TIMEFRAME_M5
+                for item in timeframes_list:
+                    key = _normalize_timeframe_key(item)
+                    if key is None:
+                        continue
+                    tf_value = mt5_timeframes_by_key.get(key)
+                    if tf_value is None:
+                        continue
+                    timeframes_meta.append({"key": key, "value": tf_value})
+                if not timeframes_meta:
+                    timeframes_meta = [{"key": "M5", "value": mt5.TIMEFRAME_M5}]
             except Exception:
                 pass
+        else:
+            for item in timeframes_list:
+                key = _normalize_timeframe_key(item)
+                minutes = _minutes_from_key(key)
+                if minutes is None and isinstance(item, int):
+                    minutes = item
+                    key = f"M{item}"
+                if minutes is None:
+                    continue
+                timeframes_meta.append({"key": key, "value": minutes})
+            if not timeframes_meta:
+                timeframes_meta = [{"key": "M5", "value": 5}]
 
-        runner = LiveRunner(strategy, exchange, risk_manager, timeframe=timeframe, poll_seconds=poll_seconds)
+        # Keep a single timeframe for backwards compatibility (first entry)
+        if timeframes_meta:
+            timeframe = timeframes_meta[0]["value"]
+
+        runner = LiveRunner(
+            strategy,
+            exchange,
+            risk_manager,
+            timeframe=timeframe,
+            timeframes=timeframes_meta,
+            preferred_timeframe=preferred_timeframe_key,
+            poll_seconds=poll_seconds
+        )
         # Live trading would be initiated here
         print(f"Running in {args.mode} mode...")
         if args.mode == 'live':

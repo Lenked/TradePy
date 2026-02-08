@@ -1,0 +1,6 @@
+# Risk management settings
+max_risk_per_trade: 0.01  # Maximum 1% risk per trade
+max_drawdown: 0.15  # Maximum 15% drawdown before stopping
+stop_loss_percentage: 0.05  # 5% stop loss
+take_profit_ratio: 2.0  # 1:2 risk to reward ratio
+max_position_size: 0.1  # Maximum 10% position size

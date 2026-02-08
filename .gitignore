@@ -61,9 +61,9 @@ data/*.pickle
 runtime/state.json
 
 # Configuration
-config/*.yaml
-config/*.yml
-config/*.json
+# config/*.yaml
+# config/*.yml
+# config/*.json
 
 # Jupyter notebooks checkpoints
 .ipynb_checkpoints/
