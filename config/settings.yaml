@@ -32,12 +32,12 @@ risk:
   max_slippage_points: 35
 
   max_spread_points_by_symbol:
-    BTCUSDm: 120
-    XAUUSDm: 80
+    BTCUSDm: 2500
+    XAUUSDm: 200
   
   max_slippage_points_by_symbol:
-    BTCUSDm: 120
-    XAUUSDm: 80
+    BTCUSDm: 1500
+    XAUUSDm: 200
 
   cooldown_overrides_by_symbol:
     BTCUSDm: 5

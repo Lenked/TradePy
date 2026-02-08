@@ -6,7 +6,7 @@ import logging as py_logging  # Import as py_logging to avoid confusion with our
 import os
 from dotenv import load_dotenv
 from config.config import load_config
-from core.strategy.trend_following import TrendFollowingStrategy
+from core.strategy.trend_following_strategy import TrendFollowingStrategy
 from core.exchange.broker import Broker
 from core.risk.manager import RiskManager
 from backtest.engine import BacktestEngine

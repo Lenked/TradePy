@@ -2,6 +2,7 @@
 Risk management for TradePy bot
 """
 from typing import List, Optional, Set, Dict
+from collections import deque
 from datetime import datetime, date, timedelta, time as dt_time
 import json
 import os
@@ -81,6 +82,9 @@ class RiskManager:
         self._profit_lock_active = False
         self._profit_lock_until: Optional[datetime] = None
         self._last_trade_time_by_symbol: Dict[str, datetime] = {}
+        self._spread_samples_by_symbol: Dict[str, deque] = {}
+        self._slippage_samples_by_symbol: Dict[str, deque] = {}
+        self._last_risk_sample_log_by_symbol: Dict[str, datetime] = {}
 
         self._load_state()
         
@@ -117,6 +121,33 @@ class RiskManager:
         if now.time() < reset_time:
             return (now.date() - timedelta(days=1))
         return now.date()
+
+    def _record_risk_sample(self, symbol: Optional[str], now: datetime,
+                            spread_points: Optional[float] = None,
+                            slippage_points: Optional[float] = None):
+        if not symbol or now is None:
+            return
+        if spread_points is not None:
+            samples = self._spread_samples_by_symbol.setdefault(symbol, deque(maxlen=60))
+            samples.append(float(spread_points))
+        if slippage_points is not None:
+            samples = self._slippage_samples_by_symbol.setdefault(symbol, deque(maxlen=60))
+            samples.append(float(slippage_points))
+
+        last_log = self._last_risk_sample_log_by_symbol.get(symbol)
+        if last_log is None or (now - last_log).total_seconds() >= 60:
+            spread_samples = self._spread_samples_by_symbol.get(symbol, deque())
+            slippage_samples = self._slippage_samples_by_symbol.get(symbol, deque())
+            spread_avg = (sum(spread_samples) / len(spread_samples)) if spread_samples else None
+            slippage_avg = (sum(slippage_samples) / len(slippage_samples)) if slippage_samples else None
+            if spread_points is not None or slippage_points is not None or spread_avg is not None or slippage_avg is not None:
+                import logging
+                logging.getLogger(__name__).info(
+                    f"RISK_SAMPLE - {symbol} "
+                    f"spread={spread_points} avg={spread_avg} n={len(spread_samples)} | "
+                    f"slippage={slippage_points} avg={slippage_avg} n={len(slippage_samples)}"
+                )
+                self._last_risk_sample_log_by_symbol[symbol] = now
 
     def _ensure_runtime_dir(self):
         directory = os.path.dirname(self.state_path)
@@ -312,6 +343,8 @@ class RiskManager:
             reference_price = float(df["close"].iloc[-2])
 
         if exchange is not None and symbol:
+            spread_sample = None
+            slippage_sample = None
             # Use symbol-specific spread threshold with fallback to default
             if self.max_spread_points_default is not None or self.max_spread_points_by_symbol:
                 # Use symbol-specific threshold if available, otherwise use default
@@ -319,12 +352,14 @@ class RiskManager:
                 if spread_threshold is not None and hasattr(exchange, "estimate_spread_points"):
                     spread_points = exchange.estimate_spread_points(symbol)
                     if spread_points is not None:
+                        spread_sample = float(spread_points)
                         if spread_points > float(spread_threshold):
                             import logging
                             logger = logging.getLogger(__name__)
                             logger.info(
                                 f"RISK_FILTER - {symbol} blocked by spread={spread_points} > limit={spread_threshold}"
                             )
+                            self._record_risk_sample(symbol, now, spread_points=spread_sample)
                             return False, "max_spread_points"
                         else:
                             import logging
@@ -339,18 +374,21 @@ class RiskManager:
                 if slippage_threshold is not None and hasattr(exchange, "estimate_slippage_points"):
                     slippage_points = exchange.estimate_slippage_points(symbol, reference_price, signal)
                     if slippage_points is not None:
+                        slippage_sample = float(slippage_points)
                         if slippage_points > float(slippage_threshold):
                             import logging
                             logger = logging.getLogger(__name__)
                             logger.info(
                                 f"RISK_FILTER - {symbol} blocked by slippage={slippage_points} > limit={slippage_threshold}"
                             )
+                            self._record_risk_sample(symbol, now, spread_points=spread_sample, slippage_points=slippage_sample)
                             return False, "max_slippage_points"
                         else:
                             import logging
                             logging.getLogger(__name__).info(
                                 f"RISK_CHECK - symbol={symbol} slippage={slippage_points} max={slippage_threshold} result=ALLOWED"
                             )
+            self._record_risk_sample(symbol, now, spread_points=spread_sample, slippage_points=slippage_sample)
 
         if not self.rules:
             return True, "No risk rules configured"
