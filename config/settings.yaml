@@ -15,8 +15,13 @@ risk:
   max_daily_loss_pct: 0.03
   max_consecutive_losses: 3
   max_trades_per_day: 10
+  # Per-symbol daily trade limits
+  max_trades_per_day_by_symbol:
+    BTCUSDm: 4
+    XAUUSDm: 4
+    USOILm: 4
   max_open_trades_per_symbol: 1
-  max_global_open_positions: 2
+  max_global_open_positions: 5
   cooldown_minutes_after_loss: 30          # base for all symbols
   global_cooldown_minutes_after_loss: 8    # small global freeze to prevent spirals
   one_trade_per_symbol_per_day: false
@@ -33,15 +38,18 @@ risk:
 
   max_spread_points_by_symbol:
     BTCUSDm: 2500
-    XAUUSDm: 200
+    XAUUSDm: 1000
+    USOILm: 200
   
   max_slippage_points_by_symbol:
     BTCUSDm: 1500
-    XAUUSDm: 200
+    XAUUSDm: 400
+    USOILm: 200
 
   cooldown_overrides_by_symbol:
     BTCUSDm: 5
     XAUUSDm: 10
+    USOILm: 10
 
   # Symbol-specific risk overrides
   max_open_trades_per_symbol_by_symbol:
@@ -51,6 +59,7 @@ risk:
   cooldown_after_trade_overrides_by_symbol:
     BTCUSDm: 30
     XAUUSDm: 45
+    USOILm: 45
 
   position_sizing:
     defaults:
@@ -61,3 +70,9 @@ risk:
       XAUUSDm:
         multiplier: 1.3
     max_lot: 0.05
+
+symbol_schedule:
+  # Saturday
+  5: ["XAUUSDm"]
+  # Sunday
+  6: ["XAUUSDm"]

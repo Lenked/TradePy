@@ -22,6 +22,7 @@ class RiskManager:
         self.max_daily_loss_pct = float(config.get("max_daily_loss_pct", 0.03))
         self.max_consecutive_losses = int(config.get("max_consecutive_losses", 3))
         self.max_trades_per_day = int(config.get("max_trades_per_day", 10))
+        self.max_trades_per_day_by_symbol = config.get("max_trades_per_day_by_symbol", {})
         self.max_open_trades_per_symbol = int(config.get("max_open_trades_per_symbol", 1))
         self.max_open_trades_per_symbol_by_symbol = config.get("max_open_trades_per_symbol_by_symbol", {})
         self.max_global_open_positions = config.get("max_global_open_positions", None)
@@ -78,6 +79,7 @@ class RiskManager:
         self._last_loss_time: Optional[datetime] = None  # Kept for global cooldown
         self._last_loss_time_by_symbol: Dict[str, datetime] = {}  # Per-symbol cooldown
         self._traded_symbols_today: Set[str] = set()
+        self._trades_today_by_symbol: Dict[str, int] = {}
         self._daily_realized_pnl = 0.0
         self._profit_lock_active = False
         self._profit_lock_until: Optional[datetime] = None
@@ -161,6 +163,7 @@ class RiskManager:
             "daily_pnl": self._daily_pnl,
             "daily_pnl_pct": self._daily_pnl_pct,
             "trades_today": self._trades_today,
+            "trades_today_by_symbol": self._trades_today_by_symbol,
             "consecutive_losses": self._consecutive_losses,
             "last_loss_time": self._last_loss_time.isoformat() if self._last_loss_time else None,
             "last_loss_time_by_symbol": {k: v.isoformat() for k, v in self._last_loss_time_by_symbol.items()},
@@ -184,6 +187,9 @@ class RiskManager:
             self._daily_pnl = float(data.get("daily_pnl", 0.0))
             self._daily_pnl_pct = float(data.get("daily_pnl_pct", 0.0))
             self._trades_today = int(data.get("trades_today", 0))
+            self._trades_today_by_symbol = {
+                k: int(v) for k, v in data.get("trades_today_by_symbol", {}).items()
+            }
             self._consecutive_losses = int(data.get("consecutive_losses", 0))
             last_loss_time = data.get("last_loss_time")
             self._last_loss_time = datetime.fromisoformat(last_loss_time) if last_loss_time else None
@@ -209,6 +215,7 @@ class RiskManager:
             self._daily_pnl = 0.0
             self._daily_pnl_pct = 0.0
             self._trades_today = 0
+            self._trades_today_by_symbol = {}
             self._consecutive_losses = 0
             self._last_loss_time = None
             self._traded_symbols_today = set()
@@ -230,6 +237,7 @@ class RiskManager:
         if symbol:
             self._traded_symbols_today.add(symbol)
             self._last_trade_time_by_symbol[symbol] = opened_at
+            self._trades_today_by_symbol[symbol] = self._trades_today_by_symbol.get(symbol, 0) + 1
         self._save_state()
 
     def record_trade_close(self, pnl: float, closed_at: datetime, symbol: Optional[str] = None):
@@ -298,6 +306,13 @@ class RiskManager:
 
         if self.max_trades_per_day and self._trades_today >= self.max_trades_per_day:
             return False, "max_trades_per_day"
+
+        if symbol and isinstance(self.max_trades_per_day_by_symbol, dict):
+            per_symbol_limit = self.max_trades_per_day_by_symbol.get(symbol)
+            if per_symbol_limit is not None:
+                trades_for_symbol = self._trades_today_by_symbol.get(symbol, 0)
+                if trades_for_symbol >= int(per_symbol_limit):
+                    return False, "max_trades_per_day_symbol"
 
         if self.max_daily_loss_pct and self._daily_pnl_pct <= -self.max_daily_loss_pct:
             return False, "max_daily_loss_pct"
@@ -410,6 +425,7 @@ class RiskManager:
             "daily_pnl": self._daily_pnl,
             "daily_pnl_pct": self._daily_pnl_pct,
             "trades_today": self._trades_today,
+            "trades_today_by_symbol": self._trades_today_by_symbol,
             "consecutive_losses": self._consecutive_losses,
             "last_loss_time": self._last_loss_time,
             "current_day": self._current_day,
