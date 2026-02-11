@@ -42,8 +42,8 @@ risk:
     USOILm: 200
   
   max_slippage_points_by_symbol:
-    BTCUSDm: 1500
-    XAUUSDm: 400
+    BTCUSDm: 20000
+    XAUUSDm: 1000
     USOILm: 200
 
   cooldown_overrides_by_symbol:
