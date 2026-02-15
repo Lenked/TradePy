@@ -700,7 +700,6 @@ class LiveRunner:
                                                 volume = max(min_lot, volume)  # Ensure minimum volume
                                                 
                                                 # Log the volume adjustment for transparency
-                                                import logging
                                                 logger = logging.getLogger(__name__)
                                                 logger.info(f"VOLUME_MULTIPLIER - {symbol} base={base_volume:.4f} -> final={volume:.4f} multiplier={multiplier}")
                                     else:
