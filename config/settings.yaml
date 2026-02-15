@@ -11,6 +11,16 @@ trading:
   preferred_timeframe: 15
   poll_seconds: 5
 
+strategy:
+  # Default ATR multiples for SL/TP
+  sl_atr_multiplier: 2.0
+  tp_atr_multiplier: 3.0
+  # Ultra-short SL/TP for USOIL
+  sl_tp_overrides_by_symbol:
+    USOILm:
+      sl_atr: 0.6
+      tp_atr: 0.9
+
 risk:
   max_daily_loss_pct: 0.03
   max_consecutive_losses: 3
@@ -40,12 +50,12 @@ risk:
   max_spread_points_by_symbol:
     BTCUSDm: 2500
     XAUUSDm: 1000
-    USOILm: 400
+    USOILm: 120
   
   max_slippage_points_by_symbol:
     BTCUSDm: 20000
     XAUUSDm: 1200
-    USOILm: 600
+    USOILm: 150
 
   cooldown_overrides_by_symbol:
     BTCUSDm: 5

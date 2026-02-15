@@ -115,7 +115,16 @@ def main():
         exchange = Broker(config)
     
     # Initialize components
-    strategy = TrendFollowingStrategy()
+    strategy_cfg = config.get("strategy", {}) if isinstance(config, dict) else {}
+    strategy = TrendFollowingStrategy(
+        ema_short_period=int(strategy_cfg.get("ema_short_period", 50)),
+        ema_long_period=int(strategy_cfg.get("ema_long_period", 200)),
+        rsi_period=int(strategy_cfg.get("rsi_period", 14)),
+        atr_period=int(strategy_cfg.get("atr_period", 14)),
+        sl_atr_multiplier=float(strategy_cfg.get("sl_atr_multiplier", 2.0)),
+        tp_atr_multiplier=float(strategy_cfg.get("tp_atr_multiplier", 3.0)),
+        sl_tp_overrides_by_symbol=strategy_cfg.get("sl_tp_overrides_by_symbol", {}),
+    )
     risk_manager = RiskManager(config.get('risk', {}))
     
     if args.mode == 'backtest':

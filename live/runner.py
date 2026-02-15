@@ -632,7 +632,15 @@ class LiveRunner:
                             if signal in ("BUY", "SELL"):
                                 try:
                                     if hasattr(self.strategy, 'compute_sl_tp'):
-                                        sl, tp = self.strategy.compute_sl_tp(df, signal)
+                                        try:
+                                            import inspect
+                                            sig = inspect.signature(self.strategy.compute_sl_tp)
+                                            if "symbol" in sig.parameters:
+                                                sl, tp = self.strategy.compute_sl_tp(df, signal, symbol=symbol)
+                                            else:
+                                                sl, tp = self.strategy.compute_sl_tp(df, signal)
+                                        except (TypeError, ValueError):
+                                            sl, tp = self.strategy.compute_sl_tp(df, signal)
                                         sl_valid = sl is not None and sl > 0
                                         tp_valid = tp is not None and tp > 0
                                     else:

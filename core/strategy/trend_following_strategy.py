@@ -35,7 +35,10 @@ class TrendFollowingStrategy(Strategy):
                  ema_short_period: int = 50,
                  ema_long_period: int = 200,
                  rsi_period: int = 14,
-                 atr_period: int = 14):
+                 atr_period: int = 14,
+                 sl_atr_multiplier: float = 2.0,
+                 tp_atr_multiplier: float = 3.0,
+                 sl_tp_overrides_by_symbol: dict = None):
         """
         Initialize the trend following strategy.
         
@@ -49,6 +52,9 @@ class TrendFollowingStrategy(Strategy):
         self.ema_long_period = ema_long_period
         self.rsi_period = rsi_period
         self.atr_period = atr_period
+        self.sl_atr_multiplier = float(sl_atr_multiplier)
+        self.tp_atr_multiplier = float(tp_atr_multiplier)
+        self.sl_tp_overrides_by_symbol = sl_tp_overrides_by_symbol or {}
         self.name = "Simple Trend Following Strategy"
     
     def calculate_ema(self, prices: pd.Series, period: int) -> pd.Series:
@@ -157,7 +163,7 @@ class TrendFollowingStrategy(Strategy):
             'atr_period': self.atr_period
         }
     
-    def compute_sl_tp(self, df: pd.DataFrame, signal: str) -> Tuple[float, float]:
+    def compute_sl_tp(self, df: pd.DataFrame, signal: str, symbol: str = None) -> Tuple[float, float]:
         """
         Compute stop loss and take profit levels.
         
@@ -182,8 +188,17 @@ class TrendFollowingStrategy(Strategy):
         atr = self.calculate_atr(atr_df, atr_period).iloc[-1]
         
         # Default risk parameters
-        sl_multiplier = 2.0  # Stop loss is 2x ATR away
-        tp_multiplier = 3.0  # Take profit is 3x ATR away (risk-reward ratio 1:1.5)
+        sl_multiplier = self.sl_atr_multiplier
+        tp_multiplier = self.tp_atr_multiplier
+
+        # Symbol-specific overrides (if configured)
+        if symbol and isinstance(self.sl_tp_overrides_by_symbol, dict):
+            override = self.sl_tp_overrides_by_symbol.get(symbol, {})
+            if isinstance(override, dict):
+                if override.get("sl_atr") is not None:
+                    sl_multiplier = float(override.get("sl_atr"))
+                if override.get("tp_atr") is not None:
+                    tp_multiplier = float(override.get("tp_atr"))
         
         if signal.upper() == 'BUY':
             sl = current_price - (sl_multiplier * atr)
