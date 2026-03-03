@@ -66,3 +66,50 @@ def test_global_open_active_ignores_inactive_symbol_positions():
         global_open_positions_count=0,
     )
     assert allowed is True
+
+
+def test_symbol_daily_loss_limit_blocks_trade():
+    rm = RiskManager({
+        "symbol_daily_loss_limit_usd_by_symbol": {"XAUUSDm": 20},
+    })
+    now = datetime(2026, 2, 24, 10, 0, 0)
+    rm.record_trade_close(-12, now, "XAUUSDm")
+    rm.record_trade_close(-9, now + timedelta(minutes=5), "XAUUSDm")
+    allowed, reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=now + timedelta(minutes=10), symbol="XAUUSDm")
+    assert allowed is False
+    assert reason == "symbol_daily_loss_limit_usd"
+
+
+def test_safe_mode_tightens_symbol_trade_limit():
+    rm = RiskManager({
+        "max_trades_per_day_by_symbol": {"XAUUSDm": 4},
+        "symbol_safe_mode_by_symbol": {
+            "XAUUSDm": {
+                "enabled_until": "2026-03-10",
+                "max_trades_per_day": 2,
+            }
+        },
+    })
+    now = datetime(2026, 3, 3, 10, 0, 0)
+    rm.record_trade_open(now, "XAUUSDm")
+    rm.record_trade_open(now + timedelta(minutes=1), "XAUUSDm")
+    allowed, reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=now + timedelta(minutes=2), symbol="XAUUSDm")
+    assert allowed is False
+    assert reason == "max_trades_per_day_symbol"
+
+
+def test_safe_mode_volume_multiplier_applies_with_base_multiplier():
+    rm = RiskManager({
+        "position_sizing": {
+            "per_symbol": {"XAUUSDm": {"multiplier": 1.3}},
+        },
+        "symbol_safe_mode_by_symbol": {
+            "XAUUSDm": {
+                "enabled_until": "2026-03-10",
+                "volume_multiplier": 0.5,
+            }
+        },
+    })
+    now = datetime(2026, 3, 3, 10, 0, 0)
+    multiplier = rm.get_effective_volume_multiplier("XAUUSDm", now=now)
+    assert abs(multiplier - 0.65) < 1e-9

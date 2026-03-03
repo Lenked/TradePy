@@ -1,7 +1,7 @@
 """
 Risk management for TradePy bot
 """
-from typing import List, Optional, Set, Dict
+from typing import List, Optional, Set, Dict, Any
 from collections import deque
 from datetime import datetime, date, timedelta, time as dt_time
 import json
@@ -61,6 +61,12 @@ class RiskManager:
         
         # Store the full position sizing config for use in volume calculations
         self.position_sizing_config = config.get("position_sizing", {})
+        self.symbol_daily_loss_limit_usd_by_symbol = config.get("symbol_daily_loss_limit_usd_by_symbol", {})
+        self.symbol_safe_mode_by_symbol = config.get("symbol_safe_mode_by_symbol", {})
+        if not isinstance(self.symbol_daily_loss_limit_usd_by_symbol, dict):
+            self.symbol_daily_loss_limit_usd_by_symbol = {}
+        if not isinstance(self.symbol_safe_mode_by_symbol, dict):
+            self.symbol_safe_mode_by_symbol = {}
         
         self.one_trade_per_symbol_per_day = bool(config.get("one_trade_per_symbol_per_day", False))
         self.cooldown_minutes_after_trade_per_symbol = int(config.get("cooldown_minutes_after_trade_per_symbol", 0))
@@ -81,6 +87,7 @@ class RiskManager:
         self._traded_symbols_today: Set[str] = set()
         self._trades_today_by_symbol: Dict[str, int] = {}
         self._daily_realized_pnl = 0.0
+        self._daily_realized_pnl_by_symbol: Dict[str, float] = {}
         self._profit_lock_active = False
         self._profit_lock_until: Optional[datetime] = None
         self._last_trade_time_by_symbol: Dict[str, datetime] = {}
@@ -123,6 +130,80 @@ class RiskManager:
         if now.time() < reset_time:
             return (now.date() - timedelta(days=1))
         return now.date()
+
+    def _get_active_symbol_safe_mode(self, symbol: Optional[str], now: Optional[datetime]) -> Optional[Dict[str, Any]]:
+        if not symbol or not isinstance(self.symbol_safe_mode_by_symbol, dict):
+            return None
+        safe_mode = self.symbol_safe_mode_by_symbol.get(symbol)
+        if not isinstance(safe_mode, dict):
+            return None
+
+        enabled_until = safe_mode.get("enabled_until")
+        if not enabled_until:
+            return safe_mode
+
+        enabled_until_str = str(enabled_until).strip()
+        if not enabled_until_str:
+            return safe_mode
+
+        # Accept either YYYY-MM-DD or full ISO datetime; date granularity is enough here.
+        try:
+            cutoff_day = date.fromisoformat(enabled_until_str[:10])
+        except Exception:
+            return None
+
+        trading_day_now = self._get_trading_day(now or datetime.now())
+        if trading_day_now <= cutoff_day:
+            return safe_mode
+        return None
+
+    def _get_effective_symbol_daily_loss_limit_usd(self, symbol: Optional[str], safe_mode: Optional[Dict[str, Any]]) -> Optional[float]:
+        if not symbol:
+            return None
+
+        base_limit = None
+        raw_base_limit = self.symbol_daily_loss_limit_usd_by_symbol.get(symbol)
+        if raw_base_limit is not None:
+            try:
+                base_limit = abs(float(raw_base_limit))
+            except Exception:
+                base_limit = None
+
+        safe_mode_limit = None
+        if safe_mode is not None and safe_mode.get("daily_loss_limit_usd") is not None:
+            try:
+                safe_mode_limit = abs(float(safe_mode.get("daily_loss_limit_usd")))
+            except Exception:
+                safe_mode_limit = None
+
+        if base_limit is None:
+            return safe_mode_limit
+        if safe_mode_limit is None:
+            return base_limit
+        return min(base_limit, safe_mode_limit)
+
+    def get_effective_volume_multiplier(self, symbol: Optional[str], now: Optional[datetime] = None) -> float:
+        multiplier = 1.0
+        if symbol and isinstance(self.position_sizing_config, dict):
+            per_symbol = self.position_sizing_config.get("per_symbol", {})
+            if isinstance(per_symbol, dict):
+                symbol_cfg = per_symbol.get(symbol, {})
+                if isinstance(symbol_cfg, dict):
+                    try:
+                        multiplier = float(symbol_cfg.get("multiplier", 1.0))
+                    except Exception:
+                        multiplier = 1.0
+
+        safe_mode = self._get_active_symbol_safe_mode(symbol, now or datetime.now())
+        if safe_mode is not None and safe_mode.get("volume_multiplier") is not None:
+            try:
+                multiplier *= float(safe_mode.get("volume_multiplier"))
+            except Exception:
+                pass
+
+        if multiplier <= 0:
+            return 1.0
+        return multiplier
 
     def _record_risk_sample(self, symbol: Optional[str], now: datetime,
                             spread_points: Optional[float] = None,
@@ -169,6 +250,7 @@ class RiskManager:
             "last_loss_time_by_symbol": {k: v.isoformat() for k, v in self._last_loss_time_by_symbol.items()},
             "traded_symbols_today": sorted(self._traded_symbols_today),
             "daily_realized_pnl": self._daily_realized_pnl,
+            "daily_realized_pnl_by_symbol": self._daily_realized_pnl_by_symbol,
             "profit_lock_active": self._profit_lock_active,
             "profit_lock_until": self._profit_lock_until.isoformat() if self._profit_lock_until else None,
             "last_trade_time_by_symbol": {k: v.isoformat() for k, v in self._last_trade_time_by_symbol.items()},
@@ -199,6 +281,9 @@ class RiskManager:
             }
             self._traded_symbols_today = set(data.get("traded_symbols_today", []))
             self._daily_realized_pnl = float(data.get("daily_realized_pnl", 0.0))
+            self._daily_realized_pnl_by_symbol = {
+                k: float(v) for k, v in data.get("daily_realized_pnl_by_symbol", {}).items()
+            }
             self._profit_lock_active = bool(data.get("profit_lock_active", False))
             profit_lock_until = data.get("profit_lock_until")
             self._profit_lock_until = datetime.fromisoformat(profit_lock_until) if profit_lock_until else None
@@ -220,6 +305,7 @@ class RiskManager:
             self._last_loss_time = None
             self._traded_symbols_today = set()
             self._daily_realized_pnl = 0.0
+            self._daily_realized_pnl_by_symbol = {}
             self._profit_lock_active = False
             self._profit_lock_until = None
             self._last_trade_time_by_symbol = {}
@@ -243,6 +329,8 @@ class RiskManager:
     def record_trade_close(self, pnl: float, closed_at: datetime, symbol: Optional[str] = None):
         self.on_new_day(self._get_trading_day(closed_at))
         self._daily_realized_pnl += float(pnl)
+        if symbol:
+            self._daily_realized_pnl_by_symbol[symbol] = self._daily_realized_pnl_by_symbol.get(symbol, 0.0) + float(pnl)
         if pnl < 0:
             self._consecutive_losses += 1
             self._last_loss_time = closed_at  # Global loss time
@@ -280,12 +368,20 @@ class RiskManager:
         symbol_open_positions_count = context.get("symbol_open_positions_count", 0)
         global_open_positions_count = context.get("global_open_positions_count", None)
         symbol = context.get("symbol")
+        safe_mode = self._get_active_symbol_safe_mode(symbol, now)
         if symbol:
             cooldown_after_trade = self.cooldown_minutes_after_trade_per_symbol
             if isinstance(self.cooldown_after_trade_overrides_by_symbol, dict):
                 override = self.cooldown_after_trade_overrides_by_symbol.get(symbol)
                 if override is not None:
                     cooldown_after_trade = int(override)
+            if safe_mode is not None:
+                safe_trade_cooldown = safe_mode.get("cooldown_after_trade_minutes")
+                if safe_trade_cooldown is not None:
+                    try:
+                        cooldown_after_trade = max(cooldown_after_trade, int(safe_trade_cooldown))
+                    except Exception:
+                        pass
             if cooldown_after_trade > 0:
                 last_trade_time = self._last_trade_time_by_symbol.get(symbol)
                 if last_trade_time is not None:
@@ -307,12 +403,30 @@ class RiskManager:
         if self.max_trades_per_day and self._trades_today >= self.max_trades_per_day:
             return False, "max_trades_per_day"
 
+        per_symbol_limit = None
         if symbol and isinstance(self.max_trades_per_day_by_symbol, dict):
-            per_symbol_limit = self.max_trades_per_day_by_symbol.get(symbol)
-            if per_symbol_limit is not None:
-                trades_for_symbol = self._trades_today_by_symbol.get(symbol, 0)
-                if trades_for_symbol >= int(per_symbol_limit):
-                    return False, "max_trades_per_day_symbol"
+            override_limit = self.max_trades_per_day_by_symbol.get(symbol)
+            if override_limit is not None:
+                per_symbol_limit = int(override_limit)
+        if safe_mode is not None:
+            safe_limit = safe_mode.get("max_trades_per_day")
+            if safe_limit is not None:
+                try:
+                    safe_limit_int = int(safe_limit)
+                    per_symbol_limit = safe_limit_int if per_symbol_limit is None else min(per_symbol_limit, safe_limit_int)
+                except Exception:
+                    pass
+        if symbol and per_symbol_limit is not None:
+            trades_for_symbol = self._trades_today_by_symbol.get(symbol, 0)
+            if trades_for_symbol >= int(per_symbol_limit):
+                return False, "max_trades_per_day_symbol"
+
+        if symbol:
+            symbol_daily_loss_limit = self._get_effective_symbol_daily_loss_limit_usd(symbol, safe_mode)
+            if symbol_daily_loss_limit is not None:
+                symbol_realized = self._daily_realized_pnl_by_symbol.get(symbol, 0.0)
+                if symbol_realized <= -symbol_daily_loss_limit:
+                    return False, "symbol_daily_loss_limit_usd"
 
         if self.max_daily_loss_pct and self._daily_pnl_pct <= -self.max_daily_loss_pct:
             return False, "max_daily_loss_pct"
@@ -333,6 +447,13 @@ class RiskManager:
         if self.cooldown_minutes_after_loss and symbol:
             # Check per-symbol cooldown after loss with potential override
             symbol_cooldown_minutes = self.cooldown_overrides_by_symbol.get(symbol, self.cooldown_minutes_after_loss)
+            if safe_mode is not None:
+                safe_loss_cooldown = safe_mode.get("cooldown_after_loss_minutes")
+                if safe_loss_cooldown is not None:
+                    try:
+                        symbol_cooldown_minutes = max(symbol_cooldown_minutes, int(safe_loss_cooldown))
+                    except Exception:
+                        pass
             last_loss_time = self._last_loss_time_by_symbol.get(symbol)
             if last_loss_time is not None:
                 cooldown_until = last_loss_time + timedelta(minutes=symbol_cooldown_minutes)
@@ -431,6 +552,7 @@ class RiskManager:
             "current_day": self._current_day,
             "traded_symbols_today": sorted(self._traded_symbols_today),
             "daily_realized_pnl": self._daily_realized_pnl,
+            "daily_realized_pnl_by_symbol": self._daily_realized_pnl_by_symbol,
             "profit_lock_active": self._profit_lock_active,
             "profit_lock_until": self._profit_lock_until,
             "last_trade_time_by_symbol": self._last_trade_time_by_symbol,

@@ -671,35 +671,35 @@ class LiveRunner:
                                     if hasattr(self.strategy, 'compute_volume'):
                                         volume = self.strategy.compute_volume(df, signal, snap.equity)
                                         
-                                        # Apply volume multiplier based on symbol if RiskManager has position sizing config
+                                        # Apply effective volume multiplier (position sizing + optional safe mode)
                                         if self.risk_manager is not None and hasattr(self.risk_manager, 'position_sizing_config'):
                                             position_sizing_config = self.risk_manager.position_sizing_config
-                                            per_symbol_config = position_sizing_config.get('per_symbol', {})
-                                            multiplier = per_symbol_config.get(symbol, {}).get('multiplier', 1.0)
-                                            
-                                            # Get max lot from config - default to 0.05 for safety
-                                            max_lot = position_sizing_config.get('max_lot', 0.05)
-                                            
+                                            max_lot = position_sizing_config.get('max_lot', 0.05)  # safety fallback
+
+                                            multiplier = 1.0
+                                            if hasattr(self.risk_manager, 'get_effective_volume_multiplier'):
+                                                multiplier = self.risk_manager.get_effective_volume_multiplier(symbol, now=datetime.now())
+                                            else:
+                                                per_symbol_config = position_sizing_config.get('per_symbol', {})
+                                                multiplier = per_symbol_config.get(symbol, {}).get('multiplier', 1.0)
+
                                             if multiplier != 1.0:
                                                 base_volume = volume
                                                 volume = volume * multiplier
-                                                
+
                                                 # Respect MT5 lot size constraints
                                                 try:
                                                     min_lot = getattr(self.exchange, 'min_lot_size', 0.01)
                                                     lot_step = getattr(self.exchange, 'lot_step_size', 0.01)
-                                                    # Align volume to MT5 requirements
                                                     if lot_step > 0:
                                                         volume = round(volume / lot_step) * lot_step
                                                 except:
                                                     min_lot = 0.01
                                                     lot_step = 0.01
-                                                    
-                                                # Apply max lot restriction from config
+
                                                 volume = min(volume, max_lot)
-                                                volume = max(min_lot, volume)  # Ensure minimum volume
-                                                
-                                                # Log the volume adjustment for transparency
+                                                volume = max(min_lot, volume)
+
                                                 logger = logging.getLogger(__name__)
                                                 logger.info(f"VOLUME_MULTIPLIER - {symbol} base={base_volume:.4f} -> final={volume:.4f} multiplier={multiplier}")
                                     else:
