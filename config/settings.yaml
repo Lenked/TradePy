@@ -42,6 +42,8 @@ risk:
   profit_lock_hours: 6
   trading_timezone: "Africa/Douala"
   daily_reset_hour: 0
+  # Block new entries at/after this local hour in trading_timezone
+  no_trade_after_hour: 20
   state_path: "runtime/state.json"
 
   max_spread_points: 35

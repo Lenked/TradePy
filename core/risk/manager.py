@@ -75,6 +75,13 @@ class RiskManager:
         self.profit_lock_hours = int(config.get("profit_lock_hours", 6))
         self.trading_timezone = str(config.get("trading_timezone", "UTC"))
         self.daily_reset_hour = int(config.get("daily_reset_hour", 0))
+        self.no_trade_after_hour = config.get("no_trade_after_hour", None)
+        if self.no_trade_after_hour is not None:
+            try:
+                cutoff_hour = int(self.no_trade_after_hour)
+                self.no_trade_after_hour = cutoff_hour if 0 <= cutoff_hour <= 23 else None
+            except Exception:
+                self.no_trade_after_hour = None
         self.state_path = config.get("state_path", "runtime/state.json")
 
         self._current_day: Optional[date] = None
@@ -130,6 +137,16 @@ class RiskManager:
         if now.time() < reset_time:
             return (now.date() - timedelta(days=1))
         return now.date()
+
+    def _to_trading_timezone(self, now: datetime) -> datetime:
+        if now is None:
+            now = datetime.now()
+        tz = self._get_tz()
+        if tz is None:
+            return now
+        if now.tzinfo is None:
+            return now.replace(tzinfo=tz)
+        return now.astimezone(tz)
 
     def _get_active_symbol_safe_mode(self, symbol: Optional[str], now: Optional[datetime]) -> Optional[Dict[str, Any]]:
         if not symbol or not isinstance(self.symbol_safe_mode_by_symbol, dict):
@@ -364,6 +381,11 @@ class RiskManager:
         
         # Use the datetime value for comparisons below
         now = now_param
+        trading_now = self._to_trading_timezone(now)
+
+        if self.no_trade_after_hour is not None:
+            if trading_now.hour >= int(self.no_trade_after_hour):
+                return False, "no_trade_after_hour"
 
         symbol_open_positions_count = context.get("symbol_open_positions_count", 0)
         global_open_positions_count = context.get("global_open_positions_count", None)

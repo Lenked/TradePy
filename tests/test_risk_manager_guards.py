@@ -113,3 +113,18 @@ def test_safe_mode_volume_multiplier_applies_with_base_multiplier():
     now = datetime(2026, 3, 3, 10, 0, 0)
     multiplier = rm.get_effective_volume_multiplier("XAUUSDm", now=now)
     assert abs(multiplier - 0.65) < 1e-9
+
+
+def test_no_trade_after_hour_blocks_evening_entries():
+    rm = RiskManager({
+        "no_trade_after_hour": 20,
+        "trading_timezone": "Africa/Douala",
+    })
+    before_cutoff = datetime(2026, 3, 4, 19, 59, 0)
+    allowed_before, _ = rm.allow_trade("BUY", 1.0, 2.0, None, now=before_cutoff, symbol="BTCUSDm")
+    assert allowed_before is True
+
+    at_cutoff = datetime(2026, 3, 4, 20, 0, 0)
+    allowed_after, reason_after = rm.allow_trade("BUY", 1.0, 2.0, None, now=at_cutoff, symbol="BTCUSDm")
+    assert allowed_after is False
+    assert reason_after == "no_trade_after_hour"
