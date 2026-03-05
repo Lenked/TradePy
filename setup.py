@@ -3,8 +3,21 @@ from setuptools import setup, find_packages
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
-with open("requirements.txt", "r", encoding="utf-8") as fh:
-    requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+
+def _load_requirements(path: str):
+    requirements = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if " #" in line:
+                line = line.split(" #", 1)[0].strip()
+            requirements.append(line)
+    return requirements
+
+
+requirements = _load_requirements("requirements.txt")
 
 setup(
     name="tradepy",
@@ -32,10 +45,21 @@ setup(
     install_requires=requirements,
     extras_require={
         "dev": [
-            "pytest>=6.0",
-            "pytest-cov>=2.0",
+            "pytest>=7.0",
+            "pytest-cov>=4.0",
+            "ruff>=0.6.0",
             "black>=21.0",
             "flake8>=3.8",
+        ],
+        "research": [
+            "backtesting>=0.3.3",
+            "optuna>=3.0.0",
+            "ta>=0.11.0",
+            "arch>=5.3.0",
+            "plotly>=5.0.0",
+        ],
+        "crypto": [
+            "ccxt>=4.0.0",
         ],
         "backtest": [
             "plotly>=5.0.0",

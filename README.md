@@ -104,7 +104,8 @@ pip install -e .
 ### Alternative Setup (for Windows compatibility)
 If you encounter issues with binary compilation, use:
 ```bash
-pip install --only-binary=all pandas numpy matplotlib seaborn scipy scikit-learn pyyaml
+pip install --only-binary=all pandas numpy matplotlib seaborn pyyaml python-dotenv
+pip install MetaTrader5 tenacity pydantic
 pip install -e .
 ```
 
@@ -128,6 +129,29 @@ python validate_structure_only.py
 ```bash
 python main.py --mode backtest
 ```
+
+### Research Workflow (Optuna + Backtesting + Plotly)
+Run optimization and generate an interactive report from an OHLCV CSV:
+
+```bash
+python -m backtest.research_workflow --csv data/processed/your_data.csv --symbol XAUUSDm --optimize --trials 30
+```
+
+Outputs:
+- `reports/backtest_report.html`
+- `reports/backtest_summary.json`
+- `reports/best_params.json` (when `--optimize` is enabled)
+
+Apply optimized parameters to your strategy settings:
+
+```bash
+python -m backtest.research_workflow --csv data/processed/your_data.csv --symbol XAUUSDm --optimize --trials 30 --apply-best-params
+```
+
+Useful flags:
+- `--optimized-settings-out config/settings.optimized.yaml`
+- `--update-settings-in-place` (writes directly to `config/settings.yaml`)
+- `--no-settings-backup` (disables `.bak` creation when in-place mode is used)
 
 ### Paper Trading
 ```bash

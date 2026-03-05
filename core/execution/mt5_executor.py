@@ -1,13 +1,37 @@
 import os
+import logging
 from typing import Optional
 import pandas as pd
 import MetaTrader5 as mt5
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
+except ImportError:  # pragma: no cover - allows graceful startup before deps install
+    def retry(*args, **kwargs):
+        def _decorator(func):
+            return func
+        return _decorator
+
+    def stop_after_attempt(*args, **kwargs):
+        return None
+
+    def wait_exponential(*args, **kwargs):
+        return None
+
+    def retry_if_exception_type(*args, **kwargs):
+        return None
+
+    def before_sleep_log(*args, **kwargs):
+        return None
 from ..exchange.live_interface import LiveExchangeInterface
 from ..models import AccountSnapshot, OrderResult
 try:
     from ..utils.logger import get_logger
 except ImportError:
     from utils.logger import get_logger
+
+
+class MT5TransientError(RuntimeError):
+    """Transient MT5 API error that can be retried."""
 
 
 class MT5Executor(LiveExchangeInterface):
@@ -19,6 +43,80 @@ class MT5Executor(LiveExchangeInterface):
         self.dry_run = dry_run
         self.account_mode = None
         self.logger = get_logger("MT5Executor")
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(MT5TransientError),
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
+    )
+    def _initialize_with_retry(self) -> None:
+        if not mt5.initialize():
+            raise MT5TransientError(f"MT5 initialize failed: {mt5.last_error()}")
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(MT5TransientError),
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
+    )
+    def _login_with_retry(self) -> None:
+        if not mt5.login(self.login, self.password, self.server):
+            raise MT5TransientError(f"MT5 login failed: {mt5.last_error()}")
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(MT5TransientError),
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
+    )
+    def _account_info_with_retry(self):
+        info = mt5.account_info()
+        if info is None:
+            raise MT5TransientError(f"MT5 account_info failed: {mt5.last_error()}")
+        return info
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(MT5TransientError),
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
+    )
+    def _copy_rates_with_retry(self, symbol: str, timeframe: int, count: int):
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+        if rates is None:
+            raise MT5TransientError(f"MT5 copy_rates_from_pos failed for {symbol}: {mt5.last_error()}")
+        return rates
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(MT5TransientError),
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
+    )
+    def _positions_get_with_retry(self, symbol: Optional[str] = None):
+        positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+        if positions is None:
+            raise MT5TransientError(f"MT5 positions_get failed: {mt5.last_error()}")
+        return positions
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type(MT5TransientError),
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
+    )
+    def _order_send_with_retry(self, request: dict):
+        result = mt5.order_send(request)
+        if result is None:
+            raise MT5TransientError(f"MT5 order_send returned None: {mt5.last_error()}")
+        return result
 
     def _resolve_symbol(self, symbol: str) -> Optional[str]:
         if not symbol:
@@ -50,18 +148,12 @@ class MT5Executor(LiveExchangeInterface):
         return "DEMO" if self.dry_run else "REAL"
 
     def connect(self) -> bool:
-        if not mt5.initialize():
-            self.logger.error(f"MT5 initialize failed: {mt5.last_error()}")
-            return False
-        if not mt5.login(self.login, self.password, self.server):
-            err = mt5.last_error()
-            mt5.shutdown()
-            self.logger.error(f"MT5 login failed: {err}")
-            return False
-
-        info = mt5.account_info()
-        if info is None:
-            self.logger.error("MT5 account_info() returned None")
+        try:
+            self._initialize_with_retry()
+            self._login_with_retry()
+            info = self._account_info_with_retry()
+        except MT5TransientError as exc:
+            self.logger.error(str(exc))
             mt5.shutdown()
             return False
 
@@ -122,9 +214,10 @@ class MT5Executor(LiveExchangeInterface):
         self.logger.info("MT5 connection shut down successfully")
 
     def account_info(self) -> AccountSnapshot:
-        info = mt5.account_info()
-        if info is None:
-            raise RuntimeError("MT5 account_info() returned None")
+        try:
+            info = self._account_info_with_retry()
+        except MT5TransientError as exc:
+            raise RuntimeError(str(exc)) from exc
         return AccountSnapshot(
             balance=float(info.balance),
             equity=float(info.equity),
@@ -138,8 +231,12 @@ class MT5Executor(LiveExchangeInterface):
         resolved = self._resolve_symbol(symbol)
         if not resolved:
             return pd.DataFrame()
-        rates = mt5.copy_rates_from_pos(resolved, timeframe, 0, count)
-        if rates is None or len(rates) == 0:
+        try:
+            rates = self._copy_rates_with_retry(resolved, timeframe, count)
+        except MT5TransientError as exc:
+            self.logger.warning(str(exc))
+            return pd.DataFrame()
+        if len(rates) == 0:
             return pd.DataFrame()
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s")
@@ -149,8 +246,11 @@ class MT5Executor(LiveExchangeInterface):
 
     def positions(self, symbol: Optional[str] = None):
         resolved = self._resolve_symbol(symbol) if symbol else None
-        pos = mt5.positions_get(symbol=resolved) if resolved else mt5.positions_get()
-        return pos if pos is not None else []
+        try:
+            return self._positions_get_with_retry(symbol=resolved)
+        except MT5TransientError as exc:
+            self.logger.warning(str(exc))
+            return []
 
     def floating_pnl(self, symbol: Optional[str] = None) -> float:
         pos = self.positions(symbol=symbol)
@@ -260,12 +360,6 @@ class MT5Executor(LiveExchangeInterface):
         if not resolved:
             return OrderResult(success=False, message=f"symbol_select_failed: {mt5.last_error()}")
 
-        # Get symbol info to normalize volume
-        symbol_info = mt5.symbol_info(resolved)
-        if symbol_info is None:
-            self.logger.error(f"MT5_SYMBOL_INFO_FAILED - Could not get symbol info for {resolved}")
-            return OrderResult(success=False, message=f"symbol_info_failed: {resolved}")
-
         side_upper = side.upper()
         if side_upper not in ["BUY", "SELL"]:
             return OrderResult(success=False, message="invalid_side")
@@ -287,8 +381,20 @@ class MT5Executor(LiveExchangeInterface):
             order_type = mt5.ORDER_TYPE_SELL
             price = float(tick.bid)
 
-        # Normalize volume based on symbol constraints
-        normalized_volume = self._normalize_volume(volume, symbol_info)
+        # Normalize volume based on symbol constraints when available.
+        # In dry-run tests we tolerate missing symbol_info and keep raw volume.
+        normalized_volume = float(volume)
+        symbol_info = mt5.symbol_info(resolved) if hasattr(mt5, "symbol_info") else None
+        if symbol_info is not None:
+            normalized_volume = self._normalize_volume(volume, symbol_info)
+        elif not self.dry_run:
+            if not hasattr(mt5, "symbol_info"):
+                self.logger.error("MT5_SYMBOL_INFO_UNAVAILABLE - MetaTrader5 symbol_info API not available")
+                return OrderResult(success=False, message="symbol_info_unavailable")
+            self.logger.error(f"MT5_SYMBOL_INFO_FAILED - Could not get symbol info for {resolved}")
+            return OrderResult(success=False, message=f"symbol_info_failed: {resolved}")
+        else:
+            self.logger.warning(f"MT5_SYMBOL_INFO_MISSING_DRY_RUN - Using raw volume for {resolved}")
         
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -316,10 +422,11 @@ class MT5Executor(LiveExchangeInterface):
                 message="dry_run_simulated",
             )
 
-        result = mt5.order_send(request)
-        if result is None:
-            self.logger.error(f"MT5_ORDER_FAILED - Symbol: {resolved} - Retcode: N/A - Comment: order_send returned None")
-            return OrderResult(success=False, retcode=None, comment="order_send returned None", request=request, message="order_send_none")
+        try:
+            result = self._order_send_with_retry(request)
+        except MT5TransientError as exc:
+            self.logger.error(f"MT5_ORDER_FAILED - Symbol: {resolved} - Retcode: N/A - Comment: {exc}")
+            return OrderResult(success=False, retcode=None, comment=str(exc), request=request, message="order_send_retry_exhausted")
 
         retcode = getattr(result, "retcode", None)
         order_id = getattr(result, "order", None) or getattr(result, "ticket", None)

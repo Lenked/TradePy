@@ -124,6 +124,17 @@ def main():
         sl_atr_multiplier=float(strategy_cfg.get("sl_atr_multiplier", 2.0)),
         tp_atr_multiplier=float(strategy_cfg.get("tp_atr_multiplier", 3.0)),
         sl_tp_overrides_by_symbol=strategy_cfg.get("sl_tp_overrides_by_symbol", {}),
+        use_pandas_ta=bool(strategy_cfg.get("use_pandas_ta", True)),
+        use_adx_filter=bool(strategy_cfg.get("use_adx_filter", True)),
+        adx_period=int(strategy_cfg.get("adx_period", 14)),
+        adx_threshold=float(strategy_cfg.get("adx_threshold", 18.0)),
+        use_arch_volatility_filter=bool(strategy_cfg.get("use_arch_volatility_filter", False)),
+        arch_lookback=int(strategy_cfg.get("arch_lookback", 300)),
+        max_conditional_volatility=(
+            float(strategy_cfg.get("max_conditional_volatility"))
+            if strategy_cfg.get("max_conditional_volatility") is not None
+            else None
+        ),
     )
     risk_manager = RiskManager(config.get('risk', {}))
     

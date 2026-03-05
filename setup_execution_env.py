@@ -12,12 +12,15 @@ import shutil
 def create_minimal_requirements():
     """Create minimal requirements file for TradePy"""
     req_content = """# Minimal requirements for TradePy execution
-pandas>=1.5.0,<2.0.0
-numpy>=1.21.0,<1.25.0
+pandas>=1.5.0
+numpy>=1.23.0
 matplotlib>=3.5.0,<3.8.0
-seaborn>=0.11.0,<0.13.0
+seaborn>=0.12.0
 pyyaml>=6.0,<7.0
-gymnasium>=0.26.0  # Modern version of gym
+python-dotenv>=1.0.0
+MetaTrader5>=5.0.45
+tenacity>=8.2.0
+pydantic>=2.0.0,<3.0.0
 """
     
     with open("minimal_requirements.txt", "w", encoding="utf-8") as f:

@@ -22,7 +22,8 @@ conda activate tradepy
 
 3. Install required packages:
 ```bash
-conda install pandas numpy matplotlib seaborn scipy scikit-learn pyyaml
+conda install pandas numpy matplotlib seaborn pyyaml
+pip install python-dotenv tenacity pydantic MetaTrader5
 ```
 
 4. Install the package in development mode:
@@ -46,7 +47,8 @@ python -m pip install --upgrade pip
 
 3. Install packages using pre-compiled wheels:
 ```bash
-pip install --only-binary=all pandas numpy matplotlib seaborn scipy scikit-learn pyyaml
+pip install --only-binary=all pandas numpy matplotlib seaborn pyyaml python-dotenv
+pip install MetaTrader5 tenacity pydantic
 ```
 
 4. Install TradePy in development mode:

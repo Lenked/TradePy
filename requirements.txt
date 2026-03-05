@@ -1,21 +1,15 @@
+# Core runtime (live bot)
 pandas
 numpy
-scipy
-matplotlib
-statsmodels
-scikit-learn
 pyyaml
-loguru
-tqdm
-pytest
-pytest-cov
-joblib
-python-dateutil
-pytz
 python-dotenv
-# ============================
-# Optional: Broker / Exchange APIs (commented by default)
-# ============================
-ccxt       # Crypto exchanges
-MetaTrader5 # Forex (MT5 Windows only)
+MetaTrader5
+
+# Reliability and config safety
+tenacity
+pydantic
+
+# Analysis used by backtest module
+matplotlib
+seaborn
 
