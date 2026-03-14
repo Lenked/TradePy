@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard de Suivi du Bot de Trading</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 Dashboard de Suivi du Bot de Trading</h1>
+            <div class="info-bar">
+                <div class="info-item">Date: <span id="current-date"></span></div>
+                <div class="info-item">Statut: <span id="connection-status">Chargement...</span></div>
+                <button id="refresh-btn">🔄 Actualiser</button>
+            </div>
+        </header>
+
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <h3>PnL Total</h3>
+                <div id="total-pnl" class="metric-value">$0.00</div>
+            </div>
+            <div class="metric-card">
+                <h3>Taux de Réussite</h3>
+                <div id="win-rate" class="metric-value">0%</div>
+            </div>
+            <div class="metric-card">
+                <h3>Trades Réalisés</h3>
+                <div id="total-trades" class="metric-value">0</div>
+            </div>
+            <div class="metric-card">
+                <h3>Positions Actives</h3>
+                <div id="active-positions" class="metric-value">0</div>
+            </div>
+        </div>
+
+        <div class="charts-container">
+            <div class="chart-wrapper">
+                <h2>évolution Cumulative du PnL</h2>
+                <div id="cumulative-pnl-chart" class="chart"></div>
+            </div>
+
+            <div class="chart-wrapper">
+                <h2>Performance Journalière</h2>
+                <div id="daily-pnl-chart" class="chart"></div>
+            </div>
+
+            <div class="chart-wrapper">
+                <h2>Répartition par Symbole</h2>
+                <div id="symbol-pnl-chart" class="chart"></div>
+            </div>
+
+            <div class="chart-wrapper">
+                <h2>Taux de Réussite</h2>
+                <div id="win-rate-chart" class="chart"></div>
+            </div>
+        </div>
+
+        <div class="data-tables">
+            <div class="table-wrapper">
+                <h2>Derniers Trades</h2>
+                <table id="recent-trades-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Symbole</th>
+                            <th>Type</th>
+                            <th>Volume</th>
+                            <th>Prix</th>
+                            <th>PnL</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recent-trades-body">
+                        <!-- Data will be populated by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
