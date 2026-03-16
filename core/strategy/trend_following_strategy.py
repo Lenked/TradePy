@@ -38,15 +38,19 @@ class TrendFollowingStrategy(Strategy):
                  atr_period: int = 14,
                  sl_atr_multiplier: float = 2.0,
                  tp_atr_multiplier: float = 3.0,
-                 sl_tp_overrides_by_symbol: dict = None):
+                 sl_tp_overrides_by_symbol: dict = None,
+                 rsi_buy_max: float = None,
+                 rsi_sell_min: float = None):
         """
         Initialize the trend following strategy.
-        
+
         Args:
             ema_short_period: Period for short EMA (default 50)
             ema_long_period: Period for long EMA (default 200)
             rsi_period: Period for RSI calculation (default 14)
             atr_period: Period for ATR calculation (default 14)
+            rsi_buy_max: BUY only if RSI < this value (e.g. 70 = avoid overbought). None = no filter.
+            rsi_sell_min: SELL only if RSI > this value (e.g. 30 = avoid oversold). None = no filter.
         """
         self.ema_short_period = ema_short_period
         self.ema_long_period = ema_long_period
@@ -55,6 +59,8 @@ class TrendFollowingStrategy(Strategy):
         self.sl_atr_multiplier = float(sl_atr_multiplier)
         self.tp_atr_multiplier = float(tp_atr_multiplier)
         self.sl_tp_overrides_by_symbol = sl_tp_overrides_by_symbol or {}
+        self.rsi_buy_max = float(rsi_buy_max) if rsi_buy_max is not None else None
+        self.rsi_sell_min = float(rsi_sell_min) if rsi_sell_min is not None else None
         self.name = "Simple Trend Following Strategy"
     
     def calculate_ema(self, prices: pd.Series, period: int) -> pd.Series:
@@ -134,12 +140,18 @@ class TrendFollowingStrategy(Strategy):
         if any(pd.isna([ema_short, ema_long, rsi])):
             return SignalType.HOLD
         
+        # Optional RSI bands: avoid buying in overbought / selling in oversold
+        if self.rsi_buy_max is not None and rsi >= self.rsi_buy_max:
+            return SignalType.HOLD  # Overbought, no BUY
+        if self.rsi_sell_min is not None and rsi <= self.rsi_sell_min:
+            return SignalType.HOLD  # Oversold, no SELL
+
         # BUY signal conditions
         if (ema_short > ema_long and    # Uptrend
             rsi > 50 and               # Positive momentum
             current_price > ema_short): # Price confirmation
             return SignalType.BUY
-        
+
         # SELL signal conditions
         elif (ema_short < ema_long and  # Downtrend
               rsi < 50 and             # Negative momentum
@@ -160,7 +172,9 @@ class TrendFollowingStrategy(Strategy):
             'ema_short_period': self.ema_short_period,
             'ema_long_period': self.ema_long_period,
             'rsi_period': self.rsi_period,
-            'atr_period': self.atr_period
+            'atr_period': self.atr_period,
+            'rsi_buy_max': self.rsi_buy_max,
+            'rsi_sell_min': self.rsi_sell_min,
         }
     
     def compute_sl_tp(self, df: pd.DataFrame, signal: str, symbol: str = None) -> Tuple[float, float]:

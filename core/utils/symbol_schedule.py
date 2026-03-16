@@ -28,16 +28,19 @@ def get_symbols_for_today(config_path: str = "config/settings.yaml") -> list:
         6: ["BTCUSDm"]   # Sunday
     }
 
-    # Try to load custom mapping from config if it exists
+    # Try to load custom mapping and symbols_disabled from config
     custom_mapping = {}
+    symbols_disabled = []
     if os.path.exists(config_path):
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
-                if config and 'symbol_schedule' in config:
-                    custom_mapping = config['symbol_schedule']
+                if config:
+                    if 'symbol_schedule' in config:
+                        custom_mapping = config['symbol_schedule']
+                    if config.get('symbols_disabled'):
+                        symbols_disabled = list(config['symbols_disabled']) if isinstance(config['symbols_disabled'], (list, tuple)) else []
         except Exception:
-            # If config loading fails, continue with default mapping
             pass
 
     # Use custom mapping if provided, otherwise default
@@ -45,6 +48,10 @@ def get_symbols_for_today(config_path: str = "config/settings.yaml") -> list:
 
     # Get current day of week (0=Monday, 6=Sunday)
     current_day = datetime.now().weekday()
+    symbols = mapping.get(current_day, ["BTCUSDm"])
 
-    # Return symbols for current day
-    return mapping.get(current_day, ["BTCUSDm"])  # Default to BTCUSDm if not found
+    # Exclude disabled symbols
+    if symbols_disabled:
+        symbols = [s for s in symbols if s not in symbols_disabled]
+
+    return symbols if symbols else ["BTCUSDm"]

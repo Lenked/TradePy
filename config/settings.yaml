@@ -12,14 +12,22 @@ trading:
   poll_seconds: 5
 
 strategy:
-  # Default ATR multiples for SL/TP
+  # Default ATR multiples for SL/TP (réduire les sorties en SL = donner plus de marge)
   sl_atr_multiplier: 2.0
   tp_atr_multiplier: 3.0
-  # Ultra-short SL/TP for USOIL
+  # Filtres RSI: éviter entrées en surachat/survente (optionnel)
+  rsi_buy_max: 70    # BUY seulement si RSI < 70
+  rsi_sell_min: 30   # SELL seulement si RSI > 30
+  # Overrides SL/TP par symbole (volatilité différente)
   sl_tp_overrides_by_symbol:
+    # USOIL: élargi (avant 0.6/0.9 = trop serré → trop de SL)
     USOILm:
-      sl_atr: 0.6
-      tp_atr: 0.9
+      sl_atr: 1.5
+      tp_atr: 2.5
+    # XAU: SL un peu plus large pour absorber les spikes, TP plus haut pour le R:R
+    XAUUSDm:
+      sl_atr: 2.5
+      tp_atr: 3.5
 
 risk:
   max_daily_loss_pct: 0.03
@@ -96,6 +104,11 @@ risk:
       XAUUSDm:
         multiplier: 1.3
     max_lot: 0.05
+
+# Symboles à exclure du trading (ex: USOILm très perdant sur l'historique)
+# Décommenter pour désactiver temporairement un symbole
+# symbols_disabled:
+#   - USOILm
 
 symbol_schedule:
   # Saturday

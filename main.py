@@ -124,6 +124,8 @@ def main():
         sl_atr_multiplier=float(strategy_cfg.get("sl_atr_multiplier", 2.0)),
         tp_atr_multiplier=float(strategy_cfg.get("tp_atr_multiplier", 3.0)),
         sl_tp_overrides_by_symbol=strategy_cfg.get("sl_tp_overrides_by_symbol", {}),
+        rsi_buy_max=strategy_cfg.get("rsi_buy_max"),
+        rsi_sell_min=strategy_cfg.get("rsi_sell_min"),
     )
     risk_manager = RiskManager(config.get('risk', {}))
     
