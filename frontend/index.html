@@ -3,83 +3,146 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard de Suivi du Bot de Trading</title>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <title>TradePy Bot Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>📊 Dashboard de Suivi du Bot de Trading</h1>
-            <div class="info-bar">
-                <div class="info-item">Date: <span id="current-date"></span></div>
-                <div class="info-item">Statut: <span id="connection-status">Chargement...</span></div>
-                <button id="refresh-btn">🔄 Actualiser</button>
+    <div class="bg-decoration"></div>
+    <main class="dashboard-shell">
+        <header class="card top-bar">
+            <div class="top-bar__left">
+                <h1>TradePy Bot Dashboard</h1>
+                <p>Lecture instantanee de la performance, du risque et des positions.</p>
+            </div>
+            <div class="top-bar__right">
+                <div id="status-pill" class="status-pill status-pill--success">
+                    <span class="dot"></span>
+                    <span id="connection-status">MT5 Connecte</span>
+                </div>
+                <div class="status-pill status-pill--muted">
+                    Sync MT5: <span id="last-sync">--:--:--</span>
+                </div>
+                <button id="refresh-btn" class="primary-btn" type="button">Rafraichir</button>
+                <div class="period-switch" role="group" aria-label="Selection de periode">
+                    <button type="button" class="period-btn" data-period="7">7j</button>
+                    <button type="button" class="period-btn" data-period="30">30j</button>
+                    <button type="button" class="period-btn" data-period="90">90j</button>
+                    <button type="button" class="period-btn active" data-period="180">180j</button>
+                </div>
             </div>
         </header>
 
-        <div class="metrics-grid">
-            <div class="metric-card">
+        <section class="kpi-grid">
+            <article class="card kpi-card">
                 <h3>PnL Total</h3>
-                <div id="total-pnl" class="metric-value">$0.00</div>
-            </div>
-            <div class="metric-card">
-                <h3>Taux de Réussite</h3>
-                <div id="win-rate" class="metric-value">0%</div>
-            </div>
-            <div class="metric-card">
-                <h3>Trades Réalisés</h3>
-                <div id="total-trades" class="metric-value">0</div>
-            </div>
-            <div class="metric-card">
+                <p id="total-pnl" class="kpi-value positive">$0.00</p>
+            </article>
+            <article class="card kpi-card">
+                <h3>Taux de Reussite</h3>
+                <p id="win-rate" class="kpi-value neutral">0%</p>
+            </article>
+            <article class="card kpi-card">
+                <h3>Trades Realises</h3>
+                <p id="total-trades" class="kpi-value neutral">0</p>
+            </article>
+            <article class="card kpi-card">
                 <h3>Positions Actives</h3>
-                <div id="active-positions" class="metric-value">0</div>
-            </div>
-        </div>
+                <p id="active-positions" class="kpi-value neutral">0</p>
+            </article>
+            <article class="card kpi-card">
+                <h3>Profit Factor</h3>
+                <p id="profit-factor" class="kpi-value neutral">0.00</p>
+            </article>
+            <article class="card kpi-card">
+                <h3>Max Drawdown</h3>
+                <p id="max-drawdown" class="kpi-value negative">$0.00</p>
+            </article>
+        </section>
 
-        <div class="charts-container">
-            <div class="chart-wrapper">
-                <h2>évolution Cumulative du PnL</h2>
-                <div id="cumulative-pnl-chart" class="chart"></div>
+        <section class="card risk-band">
+            <article class="risk-box risk-box--green">
+                <h4>Etat bot</h4>
+                <p id="risk-status">Stable</p>
+            </article>
+            <article class="risk-box risk-box--blue">
+                <h4>Exposition nette</h4>
+                <p id="net-exposure">$0.00</p>
+            </article>
+            <article class="risk-box risk-box--orange">
+                <h4>Alertes actives</h4>
+                <p id="alerts-count">0</p>
+            </article>
+        </section>
+
+        <section class="main-grid">
+            <div class="left-column">
+                <article class="card panel panel-large">
+                    <div class="panel-head">
+                        <div>
+                            <h2 id="cumulative-title">PnL Cumulatif (180 jours)</h2>
+                            <p>Courbe cumulee sur les deals fermes (ENTRY_OUT).</p>
+                        </div>
+                        <span id="cumulative-tag" class="badge badge-positive">+$0.00</span>
+                    </div>
+                    <div id="cumulative-pnl-chart" class="chart chart-large"></div>
+                </article>
+
+                <article class="card panel panel-trades">
+                    <div class="panel-head panel-head--tight">
+                        <h2>Derniers Trades (10)</h2>
+                        <span class="badge badge-light">Tri: plus recents</span>
+                    </div>
+                    <div class="trade-header">
+                        <span>Heure | Instrument | Sens</span>
+                        <span>PnL</span>
+                    </div>
+                    <div id="recent-trades-list" class="trade-list"></div>
+                </article>
             </div>
 
-            <div class="chart-wrapper">
-                <h2>Performance Journalière</h2>
-                <div id="daily-pnl-chart" class="chart"></div>
-            </div>
+            <div class="right-column">
+                <article class="card panel panel-small">
+                    <h2>PnL Quotidien</h2>
+                    <div id="daily-pnl-chart" class="chart chart-small"></div>
+                </article>
 
-            <div class="chart-wrapper">
-                <h2>Répartition par Symbole</h2>
-                <div id="symbol-pnl-chart" class="chart"></div>
-            </div>
+                <article class="card panel panel-small">
+                    <h2>PnL par Symbole</h2>
+                    <div id="symbol-pnl-chart" class="chart chart-small"></div>
+                </article>
 
-            <div class="chart-wrapper">
-                <h2>Taux de Réussite</h2>
-                <div id="win-rate-chart" class="chart"></div>
-            </div>
-        </div>
+                <article class="card panel panel-small">
+                    <h2>Taux de reussite</h2>
+                    <p class="panel-subtitle">Gagnants vs perdants sur <span id="period-caption">180</span> jours.</p>
+                    <div class="win-split">
+                        <div id="win-rate-chart" class="chart chart-donut"></div>
+                        <div class="legend-wrap">
+                            <div class="legend-row">
+                                <span class="legend-dot legend-dot--green"></span>
+                                <span id="wins-count">0 gagnants</span>
+                            </div>
+                            <div class="legend-row">
+                                <span class="legend-dot legend-dot--red"></span>
+                                <span id="losses-count">0 perdants</span>
+                            </div>
+                        </div>
+                    </div>
+                </article>
 
-        <div class="data-tables">
-            <div class="table-wrapper">
-                <h2>Derniers Trades</h2>
-                <table id="recent-trades-table">
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Symbole</th>
-                            <th>Type</th>
-                            <th>Volume</th>
-                            <th>Prix</th>
-                            <th>PnL</th>
-                        </tr>
-                    </thead>
-                    <tbody id="recent-trades-body">
-                        <!-- Data will be populated by JavaScript -->
-                    </tbody>
-                </table>
+                <article class="card panel panel-small panel-positions">
+                    <h2>Positions ouvertes</h2>
+                    <p class="panel-subtitle">Impact PnL en temps reel.</p>
+                    <div id="positions-list" class="position-list"></div>
+                </article>
             </div>
-        </div>
-    </div>
+        </section>
+
+        <div id="error-box" class="error hidden"></div>
+    </main>
 
     <script src="script.js"></script>
 </body>
