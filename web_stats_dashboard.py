@@ -49,36 +49,50 @@ def get_trading_history():
         if not connect_to_mt5():
             return {'deals': [], 'positions': []}
     
-    # Récupérer les transactions pour les 60 derniers jours (ajustable)
+    # Récupérer les transactions pour les 180 derniers jours (ajustable)
     to_date = datetime.now()
     from_date = to_date - timedelta(days=180)  # 6 mois d'historique
     
     # Récupérer les deals (transactions)
     deals = mt5.history_deals_get(from_date, to_date)
     if deals is None:
-        print("Aucun deal trouvé ou erreur survenue")
+        print("Aucun deal trouvé ou erreur survenue:", mt5.last_error())
         return {'deals': [], 'positions': []}
     
     # Récupérer les positions ouvertes
     positions = mt5.positions_get()
     if positions is None:
-        print("Aucune position trouvée ou erreur survenue")
+        print("Aucune position trouvée ou erreur survenue:", mt5.last_error())
         positions = []
     
     # Convertir les deals en liste de dictionnaires
     deals_list = []
     for deal in deals:
+        # Pour les deals MT5, il peut y avoir plusieurs types de deals (ouverture, fermeture, etc.)
+        # Le profit réel peut être dans différents champs selon le type de deal
+        commission = getattr(deal, 'commission', 0.0) or 0.0
+        swap = getattr(deal, 'swap', 0.0) or 0.0
+        profit = getattr(deal, 'profit', 0.0) or 0.0
+        
+        # Selon la documentation MT5, certains deals peuvent représenter des frais ou des ajustements
+        # et ne pas refléter le profit final d'une position fermée
+        deal_type = getattr(deal, 'type', -1)
+        
+        # Créer le dictionnaire de deal
         deal_dict = {
-            'ticket': deal.ticket,
-            'time': datetime.fromtimestamp(deal.time).isoformat(),
-            'type': 'BUY' if deal.type == 0 else 'SELL',
-            'symbol': deal.symbol,
-            'volume': deal.volume,
-            'price': deal.price,
-            'commission': deal.commission,
-            'swap': deal.swap,
-            'profit': deal.profit,
-            'comment': deal.comment
+            'ticket': getattr(deal, 'ticket', 0),
+            'time': datetime.fromtimestamp(getattr(deal, 'time', 0)).isoformat() if hasattr(deal, 'time') and getattr(deal, 'time', 0) > 0 else '',
+            'type': 'BUY' if getattr(deal, 'type', -1) == 0 else 'SELL' if getattr(deal, 'type', -1) == 1 else 'OTHER',
+            'entry_type': getattr(deal, 'entry', -1),  # ENTRY_IN=0, ENTRY_OUT=1, ENTRY_REVERSE=2
+            'symbol': getattr(deal, 'symbol', ''),
+            'volume': getattr(deal, 'volume', 0.0),
+            'price': getattr(deal, 'price', 0.0),
+            'commission': commission,
+            'swap': swap,
+            'profit': profit,
+            'comment': getattr(deal, 'comment', ''),
+            'magic': getattr(deal, 'magic', 0),  # Numéro magique éventuel
+            'order': getattr(deal, 'order', 0)   # Numéro d'ordre associé
         }
         deals_list.append(deal_dict)
     
@@ -86,21 +100,29 @@ def get_trading_history():
     positions_list = []
     for pos in positions:
         pos_dict = {
-            'ticket': pos.ticket,
-            'time': datetime.fromtimestamp(pos.time).isoformat(),
-            'type': 'BUY' if pos.type == 0 else 'SELL',
-            'symbol': pos.symbol,
-            'volume': pos.volume,
-            'price_open': pos.price_open,
-            'price_current': pos.price_current,
-            'sl': pos.sl,
-            'tp': pos.tp,
-            'profit': pos.profit
+            'ticket': getattr(pos, 'ticket', 0),
+            'time': datetime.fromtimestamp(getattr(pos, 'time', 0)).isoformat() if hasattr(pos, 'time') and getattr(pos, 'time', 0) > 0 else '',
+            'type': 'BUY' if getattr(pos, 'type', -1) == 0 else 'SELL' if getattr(pos, 'type', -1) == 1 else 'OTHER',
+            'symbol': getattr(pos, 'symbol', ''),
+            'volume': getattr(pos, 'volume', 0.0),
+            'price_open': getattr(pos, 'price_open', 0.0),
+            'price_current': getattr(pos, 'price_current', 0.0),
+            'sl': getattr(pos, 'sl', 0.0),
+            'tp': getattr(pos, 'tp', 0.0),
+            'profit': getattr(pos, 'profit', 0.0)
         }
         positions_list.append(pos_dict)
     
+    print(f"Récupéré {len(deals_list)} deals et {len(positions_list)} positions")
+    
+    # Filtrer les deals pour ne conserver que les fermetures de positions (ENTRY_OUT)
+    # Ces deals représentent généralement le profit/loss final
+    filtered_deals = [deal for deal in deals_list if deal['entry_type'] == 1]  # ENTRY_OUT
+    
+    print(f"Filtré pour ne garder que {len(filtered_deals)} deals de fermeture")
+    
     return {
-        'deals': deals_list,
+        'deals': filtered_deals,  # Utiliser les deals filtrés
         'positions': positions_list
     }
 
@@ -126,16 +148,28 @@ def calculate_metrics(history_data):
             'active_positions': len(positions)
         }
     
-    df = pd.DataFrame(deals)
-    df['time'] = pd.to_datetime(df['time'])
+    # Filtrer les deals avec des profits non nuls pour éviter les erreurs de calcul
+    valid_deals = [deal for deal in deals if isinstance(deal.get('profit'), (int, float)) and deal['profit'] != 0]
+    if not valid_deals:
+        # Si tous les profits sont zéro, inclure quand même tous les deals
+        valid_deals = deals
+    
+    df = pd.DataFrame(valid_deals)
+    if df.empty:
+        df = pd.DataFrame(deals)  # Utiliser tous les deals si aucun n'a de profit non nul
+    
+    # S'assurer que la colonne 'time' est au bon format
+    if not df.empty and 'time' in df.columns:
+        df['time'] = pd.to_datetime(df['time'], errors='coerce')
+        df = df.dropna(subset=['time'])  # Supprimer les lignes avec des dates invalides
     
     # Calculer les métriques
     total_trades = len(df)
-    profitable_trades = len(df[df['profit'] > 0])
-    losing_trades = len(df[df['profit'] < 0])
+    profitable_trades = len(df[df['profit'] > 0]) if not df.empty else 0
+    losing_trades = len(df[df['profit'] < 0]) if not df.empty else 0
     
     win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0
-    total_pnl = df['profit'].sum()
+    total_pnl = df['profit'].sum() if not df.empty else 0
     avg_profit = df[df['profit'] > 0]['profit'].mean() if profitable_trades > 0 else 0
     avg_loss = df[df['profit'] < 0]['profit'].mean() if losing_trades > 0 else 0
     
@@ -144,19 +178,24 @@ def calculate_metrics(history_data):
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float('inf')
     
     # Calculer le drawdown
-    df_sorted = df.sort_values('time')
-    cumulative_pnl = df_sorted['profit'].cumsum()
-    rolling_max = cumulative_pnl.expanding().max()
+    df_sorted = df.sort_values('time') if not df.empty else df
+    cumulative_pnl = df_sorted['profit'].cumsum() if not df_sorted.empty else pd.Series([])
+    rolling_max = cumulative_pnl.expanding().max() if not cumulative_pnl.empty else pd.Series([])
     drawdown = cumulative_pnl - rolling_max
-    max_drawdown = drawdown.min()
+    max_drawdown = drawdown.min() if not drawdown.empty else 0
     
     # Regrouper par symbole
-    symbol_pnl = df.groupby('symbol')['profit'].sum().to_dict()
-    symbol_trades = df.groupby('symbol').size().to_dict()
+    symbol_pnl = {}
+    symbol_trades = {}
+    if not df.empty and 'symbol' in df.columns:
+        symbol_pnl = df.groupby('symbol')['profit'].sum().to_dict()
+        symbol_trades = df.groupby('symbol').size().to_dict()
     
     # Regrouper par date
-    df['date'] = df['time'].dt.date.astype(str)
-    daily_pnl = df.groupby('date')['profit'].sum().to_dict()
+    daily_pnl = {}
+    if not df.empty and 'time' in df.columns:
+        df['date'] = df['time'].dt.date.astype(str)
+        daily_pnl = df.groupby('date')['profit'].sum().to_dict()
     
     metrics = {
         'total_trades': total_trades,
