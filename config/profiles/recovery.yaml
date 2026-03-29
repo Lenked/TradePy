@@ -1,0 +1,67 @@
+# Profil "RECOVERY" : réduction du risque pendant drawdown
+initial_capital: 10000
+
+trading:
+  use_mt5: true
+  dry_run: true
+  timeframe: 15
+  timeframes: [15, 60]
+  preferred_timeframe: 60
+  poll_seconds: 12
+
+strategy:
+  sl_atr_multiplier: 2.2
+  tp_atr_multiplier: 3.0
+  rsi_buy_max: 68
+  rsi_sell_min: 32
+  risk_per_trade_pct: 0.008
+  volume_aggressiveness: 0.9
+  max_base_volume: 0.08
+
+risk:
+  max_daily_loss_pct: 0.02
+  max_consecutive_losses: 2
+  max_trades_per_day: 4
+  max_trades_per_day_by_symbol:
+    BTCUSDm: 1
+    XAUUSDm: 1
+    USOILm: 1
+  max_open_trades_per_symbol: 1
+  max_global_open_positions: 3
+  cooldown_minutes_after_loss: 60
+  global_cooldown_minutes_after_loss: 20
+  cooldown_minutes_after_trade_per_symbol: 240
+  daily_profit_target_usd: 0
+  trading_timezone: "Africa/Douala"
+  daily_reset_hour: 0
+  state_path: "runtime/state.json"
+
+  max_spread_points: 35
+  max_slippage_points: 35
+  max_spread_points_by_symbol:
+    BTCUSDm: 2500
+    XAUUSDm: 1000
+    USOILm: 120
+  max_slippage_points_by_symbol:
+    BTCUSDm: 20000
+    XAUUSDm: 1200
+    USOILm: 150
+
+  cooldown_after_trade_overrides_by_symbol:
+    BTCUSDm: 180
+    XAUUSDm: 240
+    USOILm: 240
+
+  position_sizing:
+    defaults:
+      base_lot: 0.01
+    per_symbol:
+      BTCUSDm:
+        multiplier: 1.2
+      XAUUSDm:
+        multiplier: 1.1
+    max_lot: 0.06
+
+symbol_schedule:
+  5: ["XAUUSDm"]
+  6: ["XAUUSDm"]

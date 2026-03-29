@@ -40,7 +40,10 @@ class TrendFollowingStrategy(Strategy):
                  tp_atr_multiplier: float = 3.0,
                  sl_tp_overrides_by_symbol: dict = None,
                  rsi_buy_max: float = None,
-                 rsi_sell_min: float = None):
+                 rsi_sell_min: float = None,
+                 risk_per_trade_pct: float = 0.01,
+                 volume_aggressiveness: float = 1.0,
+                 max_base_volume: float = 0.10):
         """
         Initialize the trend following strategy.
 
@@ -61,6 +64,9 @@ class TrendFollowingStrategy(Strategy):
         self.sl_tp_overrides_by_symbol = sl_tp_overrides_by_symbol or {}
         self.rsi_buy_max = float(rsi_buy_max) if rsi_buy_max is not None else None
         self.rsi_sell_min = float(rsi_sell_min) if rsi_sell_min is not None else None
+        self.risk_per_trade_pct = max(0.001, float(risk_per_trade_pct))
+        self.volume_aggressiveness = max(0.1, float(volume_aggressiveness))
+        self.max_base_volume = max(0.01, float(max_base_volume))
         self.name = "Simple Trend Following Strategy"
     
     def calculate_ema(self, prices: pd.Series, period: int) -> pd.Series:
@@ -175,6 +181,9 @@ class TrendFollowingStrategy(Strategy):
             'atr_period': self.atr_period,
             'rsi_buy_max': self.rsi_buy_max,
             'rsi_sell_min': self.rsi_sell_min,
+            'risk_per_trade_pct': self.risk_per_trade_pct,
+            'volume_aggressiveness': self.volume_aggressiveness,
+            'max_base_volume': self.max_base_volume,
         }
     
     def compute_sl_tp(self, df: pd.DataFrame, signal: str, symbol: str = None) -> Tuple[float, float]:
@@ -247,12 +256,7 @@ class TrendFollowingStrategy(Strategy):
             base_volume = 0.01
         else:
             # For live trading, determine a reasonable risk-based volume
-            # Risk management: use conservative percentage of account equity per trade
-            # For typical MT5 accounts, use 1-2% of equity but capped to reasonable lot sizes
-            risk_percentage = 0.01  # 1% risk per trade (conservative)
-            
-            # Estimate risk amount based on 1:3 risk-reward ratio assumption
-            # Using a conservative approach: 0.01-0.05 lots for most retail accounts
+            # Base lot target by equity bucket (then capped by max_base_volume)
             if account_equity < 1000:
                 base_volume = 0.01  # Very small for small accounts
             elif account_equity < 5000:
@@ -262,7 +266,8 @@ class TrendFollowingStrategy(Strategy):
             elif account_equity < 25000:
                 base_volume = 0.05
             else:
-                base_volume = min(0.10, account_equity * 0.001)  # Cap at 0.10 lots or 0.1% of equity
+                base_volume = min(self.max_base_volume, account_equity * 0.001)
+            base_volume = min(base_volume, self.max_base_volume)
 
         # Calculate ATR for position sizing
         current_price = df['close'].iloc[-1]
@@ -280,15 +285,16 @@ class TrendFollowingStrategy(Strategy):
             risk_per_unit = atr * 2.0  # Default to 2x ATR if SL calculation fails
         
         # Calculate volume based on risk management
-        risk_amount = account_equity * 0.01  # Risk 1% of equity
+        risk_amount = account_equity * self.risk_per_trade_pct
         calculated_volume = risk_amount / risk_per_unit
         
-        # Use the calculated volume but cap it to reasonable limits
-        volume = min(calculated_volume, base_volume)
+        # Use a configurable aggressiveness factor while keeping a hard cap
+        target_volume = max(base_volume, calculated_volume)
+        volume = target_volume * self.volume_aggressiveness
         
         # Apply minimum and maximum volume constraints appropriate for MT5
         min_volume = 0.01  # Minimum lot size supported by most brokers
-        max_volume = 100.0  # Maximum lot size (this is quite large, most brokers have lower limits)
+        max_volume = max(0.10, self.max_base_volume)
         
         volume = max(min_volume, min(volume, max_volume))
         
