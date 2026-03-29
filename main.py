@@ -126,6 +126,9 @@ def main():
         sl_tp_overrides_by_symbol=strategy_cfg.get("sl_tp_overrides_by_symbol", {}),
         rsi_buy_max=strategy_cfg.get("rsi_buy_max"),
         rsi_sell_min=strategy_cfg.get("rsi_sell_min"),
+        risk_per_trade_pct=float(strategy_cfg.get("risk_per_trade_pct", 0.01)),
+        volume_aggressiveness=float(strategy_cfg.get("volume_aggressiveness", 1.0)),
+        max_base_volume=float(strategy_cfg.get("max_base_volume", 0.10)),
     )
     risk_manager = RiskManager(config.get('risk', {}))
     
