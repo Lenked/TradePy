@@ -3,7 +3,7 @@ from typing import Optional
 import pandas as pd
 import MetaTrader5 as mt5
 from ..exchange.live_interface import LiveExchangeInterface
-from ..models import AccountSnapshot, OrderResult
+from ..models import AccountSnapshot, OrderResult, SymbolTradeConstraints
 try:
     from ..utils.logger import get_logger
 except ImportError:
@@ -165,6 +165,31 @@ class MT5Executor(LiveExchangeInterface):
         info = mt5.symbol_info(resolved) if resolved else None
         return float(info.point) if info and info.point else None
 
+    def get_symbol_trade_constraints(self, symbol: str) -> Optional[SymbolTradeConstraints]:
+        resolved = self._resolve_symbol(symbol)
+        info = mt5.symbol_info(resolved) if resolved else None
+        if info is None:
+            return None
+
+        tick_size = getattr(info, "trade_tick_size", None) or getattr(info, "point", None)
+        tick_value = (
+            getattr(info, "trade_tick_value", None)
+            or getattr(info, "trade_tick_value_profit", None)
+            or getattr(info, "trade_tick_value_loss", None)
+        )
+        contract_size = getattr(info, "trade_contract_size", None)
+
+        return SymbolTradeConstraints(
+            symbol=resolved,
+            min_lot=float(info.volume_min),
+            max_lot=float(info.volume_max),
+            lot_step=float(info.volume_step),
+            point=float(info.point) if getattr(info, "point", None) else None,
+            tick_size=float(tick_size) if tick_size else None,
+            tick_value=float(tick_value) if tick_value else None,
+            contract_size=float(contract_size) if contract_size else None,
+        )
+
     def estimate_spread_points(self, symbol: str) -> Optional[float]:
         tick = self.get_tick(symbol)
         point = self.get_symbol_point(symbol)
@@ -217,9 +242,8 @@ class MT5Executor(LiveExchangeInterface):
         # Then align with step increment
         if step > 0:
             # Calculate how many steps fit in the adjusted volume
-            steps = adjusted_volume / step
-            # Round down to nearest integer number of steps to ensure we don't exceed constraints
-            steps = int(steps)
+            epsilon = step * 1e-9
+            steps = int((adjusted_volume + epsilon) / step)
             # Recalculate the volume
             adjusted_volume = steps * step
             

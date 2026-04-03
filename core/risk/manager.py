@@ -75,7 +75,7 @@ class RiskManager:
         self.profit_lock_hours = int(config.get("profit_lock_hours", 6))
         self.trading_timezone = str(config.get("trading_timezone", "UTC"))
         self.daily_reset_hour = int(config.get("daily_reset_hour", 0))
-        self.state_path = config.get("state_path", "runtime/state.json")
+        self.state_path = config.get("state_path")
 
         self._current_day: Optional[date] = None
         self._daily_pnl = 0.0
@@ -205,6 +205,199 @@ class RiskManager:
             return 1.0
         return multiplier
 
+    def _get_position_sizing_settings(self, symbol: Optional[str]) -> Dict[str, Any]:
+        settings: Dict[str, Any] = {}
+        if not isinstance(self.position_sizing_config, dict):
+            return settings
+
+        defaults = self.position_sizing_config.get("defaults", {})
+        if isinstance(defaults, dict):
+            settings.update(defaults)
+
+        if self.position_sizing_config.get("max_lot") is not None:
+            settings["max_lot"] = self.position_sizing_config.get("max_lot")
+
+        if symbol:
+            per_symbol = self.position_sizing_config.get("per_symbol", {})
+            if isinstance(per_symbol, dict):
+                symbol_cfg = per_symbol.get(symbol, {})
+                if isinstance(symbol_cfg, dict):
+                    settings.update(symbol_cfg)
+        return settings
+
+    @staticmethod
+    def _normalize_volume(volume: float, min_lot: float, max_lot: float, lot_step: float) -> float:
+        if max_lot <= 0:
+            max_lot = min_lot
+        adjusted_volume = max(min_lot, min(volume, max_lot))
+
+        if lot_step > 0:
+            epsilon = lot_step * 1e-9
+            steps = int((adjusted_volume + epsilon) / lot_step)
+            adjusted_volume = steps * lot_step
+            if adjusted_volume < min_lot:
+                adjusted_volume = min_lot
+            step_str = str(lot_step)
+            decimals = len(step_str.split(".")[1]) if "." in step_str else 0
+            adjusted_volume = round(adjusted_volume, decimals)
+        else:
+            adjusted_volume = round(adjusted_volume, 2)
+
+        return max(min_lot, min(adjusted_volume, max_lot))
+
+    @staticmethod
+    def _estimate_loss_per_lot(entry_price: float, sl_price: float, constraints: Optional[Any]) -> Optional[float]:
+        price_distance = abs(float(entry_price) - float(sl_price))
+        if price_distance <= 0:
+            return None
+
+        if constraints is not None:
+            tick_size = getattr(constraints, "tick_size", None) or getattr(constraints, "point", None)
+            tick_value = getattr(constraints, "tick_value", None)
+            contract_size = getattr(constraints, "contract_size", None)
+
+            if tick_size and tick_value:
+                return (price_distance / float(tick_size)) * abs(float(tick_value))
+            if contract_size:
+                return price_distance * abs(float(contract_size))
+
+        return price_distance
+
+    @staticmethod
+    def _distance_pct(entry_price: float, target_price: Optional[float]) -> float:
+        if entry_price is None or target_price is None:
+            return 0.0
+        entry_abs = abs(float(entry_price))
+        if entry_abs <= 0:
+            return 0.0
+        return abs(float(target_price) - float(entry_price)) / entry_abs
+
+    def _get_wide_setup_volume_factor(
+        self,
+        entry_price: float,
+        sl_price: Optional[float],
+        tp_price: Optional[float],
+        settings: Dict[str, Any],
+    ) -> float:
+        sl_distance_pct = self._distance_pct(entry_price, sl_price)
+        tp_distance_pct = self._distance_pct(entry_price, tp_price)
+
+        soft_sl_pct = float(settings.get("soft_max_sl_distance_pct", 0.01) or 0.0)
+        soft_tp_pct = float(settings.get("soft_max_tp_distance_pct", 0.02) or 0.0)
+        hard_sl_pct = float(settings.get("hard_max_sl_distance_pct", 0.03) or 0.0)
+        hard_tp_pct = float(settings.get("hard_max_tp_distance_pct", 0.06) or 0.0)
+        min_factor = float(settings.get("wide_distance_min_factor", 0.35) or 0.0)
+        min_factor = max(0.0, min(1.0, min_factor))
+
+        if hard_sl_pct > 0 and sl_distance_pct > hard_sl_pct:
+            return 0.0
+        if hard_tp_pct > 0 and tp_distance_pct > hard_tp_pct:
+            return 0.0
+
+        sl_factor = 1.0
+        tp_factor = 1.0
+
+        if soft_sl_pct > 0 and sl_distance_pct > soft_sl_pct:
+            sl_factor = min(1.0, soft_sl_pct / sl_distance_pct)
+        if soft_tp_pct > 0 and tp_distance_pct > soft_tp_pct:
+            tp_factor = min(1.0, soft_tp_pct / tp_distance_pct)
+
+        combined_factor = sl_factor * tp_factor
+        if combined_factor >= 1.0:
+            return 1.0
+        return max(min_factor, combined_factor)
+
+    def _get_wide_setup_block_reason(
+        self,
+        entry_price: Optional[float],
+        sl_price: Optional[float],
+        tp_price: Optional[float],
+        settings: Dict[str, Any],
+    ) -> Optional[str]:
+        if entry_price is None:
+            return None
+
+        sl_distance_pct = self._distance_pct(entry_price, sl_price)
+        tp_distance_pct = self._distance_pct(entry_price, tp_price)
+
+        hard_sl_pct = float(settings.get("hard_max_sl_distance_pct", 0.03) or 0.0)
+        hard_tp_pct = float(settings.get("hard_max_tp_distance_pct", 0.06) or 0.0)
+
+        if hard_sl_pct > 0 and sl_distance_pct > hard_sl_pct:
+            return "sl_distance_too_wide"
+        if hard_tp_pct > 0 and tp_distance_pct > hard_tp_pct:
+            return "tp_distance_too_wide"
+        return None
+
+    def compute_position_size(
+        self,
+        symbol: Optional[str],
+        account_snapshot,
+        entry_price: Optional[float],
+        sl_price: Optional[float],
+        tp_price: Optional[float] = None,
+        exchange=None,
+        now: Optional[datetime] = None,
+        confidence: Optional[float] = None,
+    ) -> float:
+        settings = self._get_position_sizing_settings(symbol)
+        equity = float(getattr(account_snapshot, "equity", 0.0) or 0.0)
+        if equity <= 0 or entry_price is None or sl_price is None:
+            return 0.0
+
+        constraints = None
+        if exchange is not None and hasattr(exchange, "get_symbol_trade_constraints"):
+            try:
+                constraints = exchange.get_symbol_trade_constraints(symbol)
+            except Exception:
+                constraints = None
+
+        base_lot = float(settings.get("base_lot", 0.01))
+        min_lot = float(settings.get("min_lot", getattr(constraints, "min_lot", base_lot) or base_lot))
+        max_lot = float(settings.get("max_lot", getattr(constraints, "max_lot", 100.0) or 100.0))
+        lot_step = float(settings.get("lot_step", getattr(constraints, "lot_step", 0.01) or 0.01))
+
+        if constraints is not None:
+            try:
+                min_lot = max(min_lot, float(getattr(constraints, "min_lot", min_lot)))
+                max_lot = min(max_lot, float(getattr(constraints, "max_lot", max_lot)))
+                lot_step = float(getattr(constraints, "lot_step", lot_step) or lot_step)
+            except Exception:
+                pass
+        max_lot = max(min_lot, max_lot)
+
+        risk_pct = float(settings.get("risk_per_trade_pct", 0.01))
+        risk_pct = max(0.0001, risk_pct)
+        risk_amount = equity * risk_pct
+        loss_per_lot = self._estimate_loss_per_lot(entry_price, sl_price, constraints)
+
+        if loss_per_lot is None or loss_per_lot <= 0:
+            raw_volume = base_lot
+        else:
+            raw_volume = risk_amount / loss_per_lot
+
+        raw_volume *= self.get_effective_volume_multiplier(symbol, now=now or datetime.now())
+
+        if confidence is not None:
+            confidence_value = max(0.0, min(1.0, float(confidence)))
+            confidence_floor = float(settings.get("confidence_floor", 0.80))
+            confidence_ceiling = float(settings.get("confidence_ceiling", 1.25))
+            confidence_factor = confidence_floor + ((confidence_ceiling - confidence_floor) * confidence_value)
+            raw_volume *= confidence_factor
+
+        geometry_factor = self._get_wide_setup_volume_factor(
+            entry_price=entry_price,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            settings=settings,
+        )
+        if geometry_factor <= 0:
+            return 0.0
+        raw_volume *= geometry_factor
+
+        raw_volume = max(base_lot, raw_volume)
+        return self._normalize_volume(raw_volume, min_lot=min_lot, max_lot=max_lot, lot_step=lot_step)
+
     def _record_risk_sample(self, symbol: Optional[str], now: datetime,
                             spread_points: Optional[float] = None,
                             slippage_points: Optional[float] = None):
@@ -233,11 +426,15 @@ class RiskManager:
                 self._last_risk_sample_log_by_symbol[symbol] = now
 
     def _ensure_runtime_dir(self):
+        if not self.state_path:
+            return
         directory = os.path.dirname(self.state_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
 
     def _save_state(self):
+        if not self.state_path:
+            return
         self._ensure_runtime_dir()
         data = {
             "current_day": self._current_day.isoformat() if self._current_day else None,
@@ -477,6 +674,24 @@ class RiskManager:
         reference_price = None
         if df is not None and len(df) >= 2:
             reference_price = float(df["close"].iloc[-2])
+        elif df is not None and len(df) >= 1:
+            reference_price = float(df["close"].iloc[-1])
+
+        if signal in ("BUY", "SELL"):
+            sizing_settings = self._get_position_sizing_settings(symbol)
+            wide_setup_reason = self._get_wide_setup_block_reason(
+                entry_price=reference_price,
+                sl_price=sl,
+                tp_price=tp,
+                settings=sizing_settings,
+            )
+            if wide_setup_reason is not None:
+                import logging
+                logging.getLogger(__name__).info(
+                    f"RISK_FILTER - {symbol} blocked by wide setup "
+                    f"entry={reference_price} sl={sl} tp={tp} reason={wide_setup_reason}"
+                )
+                return False, wide_setup_reason
 
         if exchange is not None and symbol:
             spread_sample = None

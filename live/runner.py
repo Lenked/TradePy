@@ -17,12 +17,15 @@ class LiveRunner:
     """Main runner for live trading"""
 
     def __init__(self, strategy, exchange: LiveExchangeInterface, risk_manager=None, kill_switch=None,
+                 decision_guard=None, snapshot_store=None,
                  symbol: str = "AUTO", timeframe=None, timeframes=None, preferred_timeframe=None,
                  poll_seconds: int = 5):
         self.strategy = strategy
         self.exchange = exchange
         self.risk_manager = risk_manager
         self.kill_switch = kill_switch
+        self.decision_guard = decision_guard
+        self.snapshot_store = snapshot_store
 
         self.symbol = symbol  # "AUTO" or specific symbol
         self.timeframe = timeframe
@@ -57,6 +60,14 @@ class LiveRunner:
         }
         log_level = log_levels.get(log_level_str, logging.INFO)
         self.logger.logger.set_level(log_level)
+
+        if self.decision_guard is not None and getattr(self.decision_guard, "enabled", False):
+            status = "ready" if getattr(self.decision_guard, "active", False) else "not_ready"
+            reason = getattr(self.decision_guard, "load_error", None) or getattr(self.decision_guard, "mode", "shadow")
+            self.logger.logger.info(
+                f"MODEL_GUARD_INIT - status={status} | target={getattr(self.decision_guard, 'target', 'unknown')} | "
+                f"mode={getattr(self.decision_guard, 'mode', 'shadow')} | reason={reason}"
+            )
 
     def _normalize_timeframes(self, timeframes, fallback_timeframe):
         if timeframes:
@@ -99,11 +110,93 @@ class LiveRunner:
     def _mark_traded_on_bar(self, symbol: str, bar_time: pd.Timestamp) -> None:
         self._last_trade_bar_time[symbol] = bar_time
 
-    def _log_decision_trace(self, now, current_day, symbol, df, is_new_closed_bar, signal, 
-                           sl, tp, risk_allowed, risk_reason, kill_switch_triggered, 
-                           kill_switch_reason, dry_run, order_attempted, order_result, 
+    @staticmethod
+    def _flatten_mapping(prefix, payload):
+        flattened = {}
+        if not isinstance(payload, dict):
+            return flattened
+        for key, value in payload.items():
+            flat_key = f"{prefix}{key}"
+            if isinstance(value, dict):
+                flattened.update(LiveRunner._flatten_mapping(f"{flat_key}_", value))
+            else:
+                flattened[flat_key] = value
+        return flattened
+
+    @staticmethod
+    def _build_market_snapshot(df: pd.DataFrame) -> dict:
+        if df is None or df.empty:
+            return {}
+
+        closed_df = df.iloc[:-1].copy() if len(df) >= 2 else df.copy()
+        if closed_df.empty:
+            closed_df = df.copy()
+        last_bar = closed_df.iloc[-1]
+        close_series = closed_df["close"].astype(float)
+        last_close = float(close_series.iloc[-1])
+        prev_close = float(close_series.iloc[-2]) if len(close_series) >= 2 else last_close
+
+        def _return(window: int) -> float:
+            if len(close_series) <= window:
+                return 0.0
+            base = float(close_series.iloc[-(window + 1)])
+            if not base:
+                return 0.0
+            return (last_close / base) - 1.0
+
+        pct_returns = close_series.pct_change().dropna()
+        return {
+            "closed_bar_time": closed_df.index[-1],
+            "bar_open": float(last_bar.get("open", last_close)),
+            "bar_high": float(last_bar.get("high", last_close)),
+            "bar_low": float(last_bar.get("low", last_close)),
+            "bar_close": last_close,
+            "bar_range_pct": ((float(last_bar.get("high", last_close)) - float(last_bar.get("low", last_close))) / last_close) if last_close else 0.0,
+            "bar_body_pct": ((last_close - float(last_bar.get("open", last_close))) / last_close) if last_close else 0.0,
+            "close_return_1": ((last_close / prev_close) - 1.0) if prev_close else 0.0,
+            "close_return_3": _return(3),
+            "close_return_5": _return(5),
+            "close_volatility_10": float(pct_returns.tail(10).std(ddof=0)) if len(pct_returns) >= 2 else 0.0,
+        }
+
+    def _match_open_trade_to_ticket(self, ticket: str, position_info: dict) -> None:
+        if ticket in self._open_trades:
+            trade = self._open_trades[ticket]
+            trade["position_ticket"] = ticket
+            return
+
+        candidates = []
+        for key, trade in self._open_trades.items():
+            if trade.get("position_ticket"):
+                continue
+            if trade.get("symbol") != position_info.get("symbol"):
+                continue
+            if trade.get("side") != position_info.get("side"):
+                continue
+            if abs(float(trade.get("volume", 0.0)) - float(position_info.get("volume", 0.0))) > 1e-9:
+                continue
+            candidates.append((key, trade))
+
+        if len(candidates) != 1:
+            return
+
+        old_key, trade = candidates[0]
+        self._open_trades.pop(old_key, None)
+        trade["position_ticket"] = ticket
+        trade["requested_trade_id"] = old_key
+        self._open_trades[ticket] = trade
+
+    def _record_signal_snapshot(self, payload: dict) -> None:
+        if self.snapshot_store is None:
+            return
+        self.snapshot_store.append_event("signal_snapshot", payload)
+
+    def _log_decision_trace(self, now, current_day, symbol, df, is_new_closed_bar, signal,
+                           sl, tp, risk_allowed, risk_reason, kill_switch_triggered,
+                           kill_switch_reason, dry_run, order_attempted, order_result,
                            open_positions_count, global_open_positions_count=None,
-                           chosen_symbol=None, reason=None, state=None, timeframe_key=None):
+                           chosen_symbol=None, reason=None, state=None, timeframe_key=None,
+                           confidence=None, decision_source=None):
         """Log decision trace once per minute per symbol to avoid spam"""
         current_time = now.timestamp()
         trace_key = f"decision_trace_{symbol}_{timeframe_key or 'default'}"
@@ -152,6 +245,8 @@ class LiveRunner:
                 f"startup_grace_remaining={self._startup_grace_period_active} | "
                 f"open_positions_count={open_positions_count} | "
                 f"signal={signal} | "
+                f"confidence={confidence} | "
+                f"decision_source={decision_source} | "
                 f"sl={sl} (valid: {sl_valid}) | tp={tp} (valid: {tp_valid}) | "
                 f"risk_allowed={risk_allowed} ({risk_reason}) | "
                 f"kill_switch_triggered={kill_switch_triggered} ({kill_switch_reason}) | "
@@ -207,7 +302,13 @@ class LiveRunner:
             preferred = next((c for c in candidates if c.get("tf_key") == self.preferred_timeframe_key), None)
             if preferred:
                 return preferred
-        return candidates[0]
+        return max(
+            candidates,
+            key=lambda c: (
+                1 if c.get("signal") in ("BUY", "SELL") else 0,
+                float(c.get("confidence", 0.0)),
+            ),
+        )
 
     def _resolve_timeframe_signal(self, candidates):
         actionable = [c for c in candidates if c.get("signal") in ("BUY", "SELL")]
@@ -262,15 +363,28 @@ class LiveRunner:
             if info["ticket"]:
                 current[info["ticket"]] = info
 
+        previous_tickets = set(self._open_positions_snapshot.keys())
+        new_tickets = [ticket for ticket in current.keys() if ticket not in previous_tickets]
+        for ticket in new_tickets:
+            self._match_open_trade_to_ticket(ticket, current[ticket])
+
         closed_tickets = [t for t in self._open_positions_snapshot.keys() if t not in current]
         for ticket in closed_tickets:
             closed = self._open_positions_snapshot[ticket]
             pnl = closed.get("profit", 0.0)
             symbol = closed.get("symbol")
             closed_at = datetime.now()
+            trade_meta = self._open_trades.get(ticket, {})
 
             if self.risk_manager is not None:
                 self.risk_manager.record_trade_close(pnl, closed_at, symbol)
+            if self.decision_guard is not None:
+                self.decision_guard.record_trade_close(
+                    symbol=symbol,
+                    side=closed.get("side"),
+                    volume=closed.get("volume", 0.0),
+                    pnl=pnl,
+                )
 
             self._reporter.record_trade_close(
                 trade_id=ticket,
@@ -281,6 +395,22 @@ class LiveRunner:
                 close_time=closed_at,
                 pnl=pnl,
             )
+
+            if self.snapshot_store is not None:
+                self.snapshot_store.append_event(
+                    "trade_closed",
+                    {
+                        "trade_id": ticket,
+                        "requested_trade_id": trade_meta.get("requested_trade_id"),
+                        "snapshot_id": trade_meta.get("snapshot_id"),
+                        "symbol": symbol,
+                        "side": closed.get("side"),
+                        "volume": closed.get("volume", 0.0),
+                        "open_time": closed.get("open_time"),
+                        "close_time": closed_at,
+                        "pnl": pnl,
+                    },
+                )
 
             if ticket in self._open_trades:
                 self._open_trades.pop(ticket, None)
@@ -504,6 +634,8 @@ class LiveRunner:
                     risk_allowed = True
                     risk_reason = "OK"
                     dry_run = getattr(self.exchange, 'dry_run', True)
+                    confidence = None
+                    decision_source = None
                     state = "waiting_new_bar"  # State for decision trace
                     order_result = "no_new_bar"
                     
@@ -539,7 +671,9 @@ class LiveRunner:
                         kill_switch_triggered, kill_switch_reason, 
                         dry_run, False, order_result, 
                         open_positions_count, global_open_positions_active, symbol, "waiting_new_bar_for_symbol", state,
-                        timeframe_key=timeframe_key
+                        timeframe_key=timeframe_key,
+                        confidence=confidence,
+                        decision_source=decision_source
                     )
 
                     # Only act on new closed bar (any timeframe) and after startup grace period
@@ -557,14 +691,41 @@ class LiveRunner:
                             
                             # Generate signal per timeframe (new bars only)
                             for candidate in new_bar_candidates:
+                                candidate["signal"] = "HOLD"
+                                candidate["confidence"] = 0.0
+                                candidate["decision_source"] = "base_strategy"
+                                candidate["decision_reason"] = "no_signal"
                                 try:
-                                    candidate["signal"] = self.strategy.generate_signal(candidate["df"])
+                                    if hasattr(self.strategy, "generate_decision"):
+                                        try:
+                                            import inspect
+                                            decision_sig = inspect.signature(self.strategy.generate_decision)
+                                            if "symbol" in decision_sig.parameters:
+                                                decision = self.strategy.generate_decision(candidate["df"], symbol=symbol)
+                                            else:
+                                                decision = self.strategy.generate_decision(candidate["df"])
+                                        except (TypeError, ValueError):
+                                            decision = self.strategy.generate_decision(candidate["df"])
+
+                                        if isinstance(decision, dict):
+                                            candidate["decision"] = decision
+                                            candidate["signal"] = decision.get("signal", "HOLD")
+                                            candidate["confidence"] = float(decision.get("confidence", 0.0) or 0.0)
+                                            candidate["decision_source"] = decision.get("source", "strategy_decision")
+                                            candidate["decision_reason"] = decision.get("reason", "decision_returned")
+                                        else:
+                                            candidate["signal"] = decision or "HOLD"
+                                    else:
+                                        candidate["signal"] = self.strategy.generate_signal(candidate["df"])
+                                        if candidate["signal"] in ("BUY", "SELL"):
+                                            candidate["confidence"] = 0.55
                                 except AttributeError:
                                     self.logger.logger.warning("Strategy missing generate_signal method, defaulting to HOLD")
                                     candidate["signal"] = "HOLD"
                                 except Exception as e:
                                     self.logger.logger.warning(f"Strategy signal error for {symbol}: {e}")
                                     candidate["signal"] = "HOLD"
+                                    candidate["decision_reason"] = f"strategy_signal_error: {e}"
 
                             chosen_candidate, selected_reason = self._resolve_timeframe_signal(new_bar_candidates)
                             if chosen_candidate is None:
@@ -574,10 +735,14 @@ class LiveRunner:
                                     df = hold_candidate["df"]
                                     timeframe_key = hold_candidate["tf_key"]
                                 signal = "HOLD"
+                                confidence = hold_candidate.get("confidence") if hold_candidate else None
+                                decision_source = hold_candidate.get("decision_source") if hold_candidate else None
                                 if selected_reason == "timeframe_conflict":
                                     hold_reason_msg = f" (timeframe conflict, prefer {self.preferred_timeframe_key or 'none'})"
                                 else:
-                                    if hasattr(self.strategy, 'hold_reason'):
+                                    if hold_candidate and hold_candidate.get("decision_reason"):
+                                        hold_reason_msg = f" ({hold_candidate.get('decision_reason')})"
+                                    elif hasattr(self.strategy, 'hold_reason'):
                                         try:
                                             reason = self.strategy.hold_reason(df)
                                             if reason:
@@ -591,13 +756,43 @@ class LiveRunner:
                                     f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | "
                                     f"Reason: {selected_reason}{hold_reason_msg}"
                                 )
+                                snapshot_id = self.snapshot_store.next_snapshot_id(symbol, datetime.now()) if self.snapshot_store is not None else None
+                                snapshot_payload = {
+                                    "snapshot_id": snapshot_id,
+                                    "event_time": datetime.now(),
+                                    "symbol": symbol,
+                                    "timeframe_key": timeframe_key or "default",
+                                    "selected_reason": selected_reason,
+                                    "signal": signal,
+                                    "confidence": confidence,
+                                    "decision_source": decision_source,
+                                    "decision_reason": hold_candidate.get("decision_reason") if hold_candidate else selected_reason,
+                                    "hold_reason": hold_reason_msg.strip() if hold_reason_msg else "",
+                                    "risk_allowed": risk_allowed,
+                                    "risk_reason": selected_reason,
+                                    "kill_switch_triggered": kill_switch_triggered,
+                                    "kill_switch_reason": kill_switch_reason,
+                                    "order_attempted": False,
+                                    "order_result": selected_reason,
+                                    "balance": snap.balance,
+                                    "equity": snap.equity,
+                                    "daily_pnl": daily_pnl,
+                                    "floating_pnl": floating,
+                                    "symbol_open_positions_count": open_positions_count,
+                                    "global_open_positions_count": global_open_positions_active,
+                                }
+                                snapshot_payload.update(self._flatten_mapping("decision_", hold_candidate.get("decision", {}) if hold_candidate else {}))
+                                snapshot_payload.update(self._flatten_mapping("market_", self._build_market_snapshot(df)))
+                                self._record_signal_snapshot(snapshot_payload)
                                 self._log_decision_trace(
                                     datetime.now(), current_day, symbol, df, True,
                                     signal, sl, tp, risk_allowed, selected_reason,
                                     kill_switch_triggered, kill_switch_reason,
                                     dry_run, False, selected_reason,
                                     open_positions_count, global_open_positions_active, symbol, selected_reason, "hold_signal",
-                                    timeframe_key=timeframe_key
+                                    timeframe_key=timeframe_key,
+                                    confidence=confidence,
+                                    decision_source=decision_source
                                 )
                                 continue
 
@@ -606,10 +801,18 @@ class LiveRunner:
                             timeframe_key = chosen_candidate["tf_key"]
                             signal = chosen_candidate.get("signal", "HOLD")
                             closed_bar_time = chosen_candidate.get("closed_bar_time")
+                            confidence = chosen_candidate.get("confidence")
+                            decision_source = chosen_candidate.get("decision_source")
+                            chosen_decision = chosen_candidate.get("decision", {})
+                            snapshot_id = self.snapshot_store.next_snapshot_id(symbol, datetime.now()) if self.snapshot_store is not None else None
+                            entry_price = None
+                            guard_result = None
 
                             # Check for hold reason if strategy supports it
                             if signal == "HOLD":
-                                if hasattr(self.strategy, 'hold_reason'):
+                                if chosen_candidate.get("decision_reason"):
+                                    hold_reason_msg = f" ({chosen_candidate.get('decision_reason')})"
+                                elif hasattr(self.strategy, 'hold_reason'):
                                     try:
                                         reason = self.strategy.hold_reason(df)
                                         if reason:
@@ -668,46 +871,42 @@ class LiveRunner:
                             # Calculate volume if needed
                             if signal in ("BUY", "SELL"):
                                 try:
-                                    if hasattr(self.strategy, 'compute_volume'):
-                                        volume = self.strategy.compute_volume(df, signal, snap.equity)
-                                        
-                                        # Apply effective volume multiplier (position sizing + optional safe mode)
-                                        if self.risk_manager is not None and hasattr(self.risk_manager, 'position_sizing_config'):
-                                            position_sizing_config = self.risk_manager.position_sizing_config
-                                            max_lot = position_sizing_config.get('max_lot', 0.05)  # safety fallback
+                                    entry_price = float(df["close"].iloc[-2]) if len(df) >= 2 else float(df["close"].iloc[-1])
+                                    if self.risk_manager is not None and hasattr(self.risk_manager, "compute_position_size"):
+                                        volume = self.risk_manager.compute_position_size(
+                                            symbol=symbol,
+                                            account_snapshot=snap,
+                                            entry_price=entry_price,
+                                            sl_price=sl,
+                                            tp_price=tp,
+                                            exchange=self.exchange,
+                                            now=datetime.now(),
+                                            confidence=confidence,
+                                        )
+                                        logging.getLogger(__name__).info(
+                                            f"POSITION_SIZE - {symbol} entry={entry_price:.5f} sl={sl} "
+                                            f"confidence={confidence} volume={volume:.4f}"
+                                        )
 
-                                            multiplier = 1.0
-                                            if hasattr(self.risk_manager, 'get_effective_volume_multiplier'):
-                                                multiplier = self.risk_manager.get_effective_volume_multiplier(symbol, now=datetime.now())
-                                            else:
-                                                per_symbol_config = position_sizing_config.get('per_symbol', {})
-                                                multiplier = per_symbol_config.get(symbol, {}).get('multiplier', 1.0)
-
-                                            if multiplier != 1.0:
-                                                base_volume = volume
-                                                volume = volume * multiplier
-
-                                                # Respect MT5 lot size constraints
-                                                try:
-                                                    min_lot = getattr(self.exchange, 'min_lot_size', 0.01)
-                                                    lot_step = getattr(self.exchange, 'lot_step_size', 0.01)
-                                                    if lot_step > 0:
-                                                        volume = round(volume / lot_step) * lot_step
-                                                except:
-                                                    min_lot = 0.01
-                                                    lot_step = 0.01
-
-                                                volume = min(volume, max_lot)
-                                                volume = max(min_lot, volume)
-
-                                                logger = logging.getLogger(__name__)
-                                                logger.info(f"VOLUME_MULTIPLIER - {symbol} base={base_volume:.4f} -> final={volume:.4f} multiplier={multiplier}")
-                                    else:
-                                        self.logger.logger.warning(f"Strategy missing compute_volume method for {symbol}")
-                                        volume = 0.1  # Default small volume
+                                    if volume <= 0 and hasattr(self.strategy, 'compute_volume'):
+                                        try:
+                                            import inspect
+                                            volume_sig = inspect.signature(self.strategy.compute_volume)
+                                            compute_kwargs = {}
+                                            if "symbol" in volume_sig.parameters:
+                                                compute_kwargs["symbol"] = symbol
+                                            if "sl" in volume_sig.parameters:
+                                                compute_kwargs["sl"] = sl
+                                            if "tp" in volume_sig.parameters:
+                                                compute_kwargs["tp"] = tp
+                                            volume = self.strategy.compute_volume(df, signal, snap.equity, **compute_kwargs)
+                                        except (TypeError, ValueError):
+                                            volume = self.strategy.compute_volume(df, signal, snap.equity)
+                                    elif volume <= 0:
+                                        self.logger.logger.warning(f"No volume calculator available for {symbol}")
                                 except Exception as e:
                                     self.logger.logger.warning(f"Failed to compute volume for {symbol}: {e}")
-                                    volume = 0.1  # Default small volume
+                                    volume = 0.0
 
                             # Check if risk is allowed
                             if self.risk_manager is not None and signal in ("BUY", "SELL"):
@@ -732,6 +931,31 @@ class LiveRunner:
                                     risk_allowed = False
                                     risk_reason = f"Risk manager error: {e}"
 
+                            if self.decision_guard is not None and signal in ("BUY", "SELL") and volume > 0:
+                                try:
+                                    guard_result = self.decision_guard.evaluate(symbol=symbol, side=signal, volume=volume)
+                                    if guard_result.get("enabled"):
+                                        self.logger.logger.info(
+                                            f"MODEL_GUARD - Symbol: {symbol} | TF: {timeframe_key or 'default'} | "
+                                            f"Target: {guard_result.get('target')} | Score: {guard_result.get('score')} | "
+                                            f"Mode: {guard_result.get('mode')} | WouldBlock: {guard_result.get('would_block')} | "
+                                            f"Reason: {guard_result.get('reason')}"
+                                        )
+                                    if guard_result.get("active") and guard_result.get("mode") == "enforce" and guard_result.get("would_block"):
+                                        risk_allowed = False
+                                        risk_reason = f"model_big_loss_block:{guard_result.get('score')}"
+                                except Exception as e:
+                                    guard_result = {
+                                        "enabled": True,
+                                        "active": False,
+                                        "mode": "shadow",
+                                        "score": None,
+                                        "would_block": False,
+                                        "should_throttle": False,
+                                        "recommended_volume_factor": 1.0,
+                                        "reason": f"guard_error:{e}",
+                                    }
+
                             # Determine if in dry run mode (check if exchange has a dry_run attribute or similar)
                             dry_run = getattr(self.exchange, 'dry_run', True)  # Default to True if not specified
 
@@ -739,7 +963,11 @@ class LiveRunner:
                             if signal in ("BUY", "SELL"):
                                 # Check all conditions
                                 sl_tp_ok = sl_valid and tp_valid
-                                strategy_methods_ok = hasattr(self.strategy, 'compute_sl_tp') and hasattr(self.strategy, 'compute_volume')
+                                has_volume_calculator = (
+                                    (self.risk_manager is not None and hasattr(self.risk_manager, "compute_position_size"))
+                                    or hasattr(self.strategy, "compute_volume")
+                                )
+                                strategy_methods_ok = hasattr(self.strategy, 'compute_sl_tp') and has_volume_calculator
                                 
                                 if not strategy_methods_ok:
                                     state = "hold_signal"
@@ -753,6 +981,15 @@ class LiveRunner:
                                     risk_reason = "invalid_sl_tp"
                                     risk_allowed = False
                                     self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Reason: Invalid SL/TP values")
+                                elif volume <= 0:
+                                    state = "risk_blocked"
+                                    order_result = "invalid_volume"
+                                    risk_reason = "invalid_volume"
+                                    risk_allowed = False
+                                    self.logger.logger.info(
+                                        f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | "
+                                        f"Reason: Invalid computed volume"
+                                    )
                                 elif risk_allowed and not kill_switch_triggered:
                                     if self._already_traded_on_bar(symbol, closed_bar_time):
                                         state = "risk_blocked"
@@ -793,7 +1030,24 @@ class LiveRunner:
                                                     "side": signal,
                                                     "volume": volume,
                                                     "open_time": datetime.now(),
+                                                    "snapshot_id": snapshot_id,
                                                 }
+                                                if self.snapshot_store is not None:
+                                                    self.snapshot_store.append_event(
+                                                        "trade_opened",
+                                                        {
+                                                            "trade_id": trade_id,
+                                                            "snapshot_id": snapshot_id,
+                                                            "symbol": symbol,
+                                                            "side": signal,
+                                                            "volume": volume,
+                                                            "open_time": datetime.now(),
+                                                            "timeframe_key": timeframe_key or "default",
+                                                            "entry_price": entry_price,
+                                                            "sl": sl,
+                                                            "tp": tp,
+                                                        },
+                                                    )
                                                 if self.risk_manager is not None:
                                                     self.risk_manager.record_trade_open(datetime.now(), symbol)
                                             else:
@@ -831,6 +1085,43 @@ class LiveRunner:
                                 order_attempted = False
                                 self.logger.logger.debug(f"HOLD reason - Symbol: {symbol} | TF: {timeframe_key or 'default'} | HOLD signal{hold_reason_msg}")
                                 self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Reason: HOLD signal")
+
+                            snapshot_payload = {
+                                "snapshot_id": snapshot_id,
+                                "event_time": datetime.now(),
+                                "symbol": symbol,
+                                "timeframe_key": timeframe_key or "default",
+                                "selected_reason": selected_reason,
+                                "signal": signal,
+                                "confidence": confidence,
+                                "decision_source": decision_source,
+                                "decision_reason": chosen_candidate.get("decision_reason"),
+                                "hold_reason": hold_reason_msg.strip() if hold_reason_msg else "",
+                                "entry_price": entry_price,
+                                "sl": sl,
+                                "tp": tp,
+                                "volume": volume,
+                                "risk_allowed": risk_allowed,
+                                "risk_reason": risk_reason,
+                                "kill_switch_triggered": kill_switch_triggered,
+                                "kill_switch_reason": kill_switch_reason,
+                                "order_attempted": order_attempted,
+                                "order_result": order_result,
+                                "balance": snap.balance,
+                                "equity": snap.equity,
+                                "daily_pnl": daily_pnl,
+                                "floating_pnl": floating,
+                                "symbol_open_positions_count": open_positions_count,
+                                "global_open_positions_count": global_open_positions_active,
+                            }
+                            snapshot_payload.update(self._flatten_mapping("decision_", chosen_decision))
+                            snapshot_payload.update(self._flatten_mapping("market_", self._build_market_snapshot(df)))
+                            if isinstance(guard_result, dict):
+                                guard_meta = dict(guard_result)
+                                regime_features = guard_meta.pop("feature_row", {})
+                                snapshot_payload.update(self._flatten_mapping("guard_", guard_meta))
+                                snapshot_payload.update(self._flatten_mapping("regime_", regime_features))
+                            self._record_signal_snapshot(snapshot_payload)
                             
                             # After processing, log the complete decision trace with updated values
                             self._log_decision_trace(
@@ -839,7 +1130,9 @@ class LiveRunner:
                                 kill_switch_triggered, kill_switch_reason, 
                                 dry_run, order_attempted, order_result, 
                                 open_positions_count, global_open_positions_active, symbol, risk_reason, state,
-                                timeframe_key=timeframe_key
+                                timeframe_key=timeframe_key,
+                                confidence=confidence,
+                                decision_source=decision_source
                             )
                             
                             # In DEBUG mode, show the last 3 candles and EMA values

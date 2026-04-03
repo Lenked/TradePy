@@ -5,7 +5,7 @@ Defines minimal interface required for live trading operations
 from abc import ABC, abstractmethod
 from typing import Optional
 import pandas as pd
-from ..models import AccountSnapshot, OrderResult
+from ..models import AccountSnapshot, OrderResult, SymbolTradeConstraints
 
 
 class LiveExchangeInterface(ABC):
@@ -39,6 +39,11 @@ class LiveExchangeInterface(ABC):
     @abstractmethod
     def floating_pnl(self, symbol: Optional[str] = None) -> float:
         """Get floating PnL for a symbol or all positions"""
+        pass
+
+    @abstractmethod
+    def get_symbol_trade_constraints(self, symbol: str) -> Optional[SymbolTradeConstraints]:
+        """Get trade constraints and tick metadata for a symbol."""
         pass
 
     @abstractmethod

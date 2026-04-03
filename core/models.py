@@ -37,3 +37,16 @@ class OrderResult:
     request: Optional[Dict[str, Any]] = None
     message: str = ""
     details: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class SymbolTradeConstraints:
+    """Broker constraints and tick metadata used for sizing."""
+    symbol: str
+    min_lot: float
+    max_lot: float
+    lot_step: float
+    point: Optional[float] = None
+    tick_size: Optional[float] = None
+    tick_value: Optional[float] = None
+    contract_size: Optional[float] = None

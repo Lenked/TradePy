@@ -1,6 +1,12 @@
 from datetime import datetime, timedelta
 
+import pandas as pd
+
 from core.risk.manager import RiskManager
+
+
+def _price_df(values):
+    return pd.DataFrame({"close": values})
 
 
 def test_daily_loss_blocks_trade():
@@ -113,3 +119,53 @@ def test_safe_mode_volume_multiplier_applies_with_base_multiplier():
     now = datetime(2026, 3, 3, 10, 0, 0)
     multiplier = rm.get_effective_volume_multiplier("XAUUSDm", now=now)
     assert abs(multiplier - 0.65) < 1e-9
+
+
+def test_allow_trade_blocks_when_stop_loss_distance_is_too_wide():
+    rm = RiskManager(
+        {
+            "position_sizing": {
+                "defaults": {
+                    "hard_max_sl_distance_pct": 0.03,
+                    "hard_max_tp_distance_pct": 0.10,
+                }
+            }
+        }
+    )
+    now = datetime(2026, 3, 3, 10, 0, 0)
+    allowed, reason = rm.allow_trade(
+        "BUY",
+        95.0,
+        104.0,
+        None,
+        now=now,
+        symbol="BTCUSDm",
+        df=_price_df([100.0, 101.0]),
+    )
+    assert allowed is False
+    assert reason == "sl_distance_too_wide"
+
+
+def test_allow_trade_blocks_when_take_profit_distance_is_too_wide():
+    rm = RiskManager(
+        {
+            "position_sizing": {
+                "defaults": {
+                    "hard_max_sl_distance_pct": 0.10,
+                    "hard_max_tp_distance_pct": 0.05,
+                }
+            }
+        }
+    )
+    now = datetime(2026, 3, 3, 10, 0, 0)
+    allowed, reason = rm.allow_trade(
+        "BUY",
+        98.0,
+        106.0,
+        None,
+        now=now,
+        symbol="BTCUSDm",
+        df=_price_df([100.0, 101.0]),
+    )
+    assert allowed is False
+    assert reason == "tp_distance_too_wide"

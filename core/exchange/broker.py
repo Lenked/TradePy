@@ -4,7 +4,7 @@ Broker implementation for exchange operations
 from .interface import ExchangeInterface
 import pandas as pd
 from typing import Optional
-from ..models import AccountSnapshot, OrderResult
+from ..models import AccountSnapshot, OrderResult, SymbolTradeConstraints
 import time
 
 
@@ -162,8 +162,21 @@ class Broker(ExchangeInterface):
             except:
                 # If we can't get current price, return 0
                 continue
-                
+                 
         return total_pnl
+
+    def get_symbol_trade_constraints(self, symbol: str) -> Optional[SymbolTradeConstraints]:
+        """Return conservative simulated constraints for position sizing."""
+        return SymbolTradeConstraints(
+            symbol=symbol,
+            min_lot=0.01,
+            max_lot=100.0,
+            lot_step=0.01,
+            point=0.0001,
+            tick_size=0.0001,
+            tick_value=1.0,
+            contract_size=100000.0,
+        )
 
     def estimate_spread_points(self, symbol: str) -> Optional[float]:
         return 0.0

@@ -6,6 +6,7 @@ import logging as py_logging  # Import as py_logging to avoid confusion with our
 import os
 from dotenv import load_dotenv
 from config.config import load_config
+from ai.decision import DashboardDecisionGuard, SignalSnapshotStore
 from core.strategy.trend_following_strategy import TrendFollowingStrategy
 from core.exchange.broker import Broker
 from core.risk.manager import RiskManager
@@ -126,6 +127,7 @@ def main():
         sl_tp_overrides_by_symbol=strategy_cfg.get("sl_tp_overrides_by_symbol", {}),
         rsi_buy_max=strategy_cfg.get("rsi_buy_max"),
         rsi_sell_min=strategy_cfg.get("rsi_sell_min"),
+        ai_decision_config=strategy_cfg.get("ai_decision", {}),
     )
     risk_manager = RiskManager(config.get('risk', {}))
     
@@ -138,6 +140,7 @@ def main():
         timeframes_config = trading_config.get('timeframes', None)
         preferred_timeframe_cfg = trading_config.get('preferred_timeframe', None)
         poll_seconds = trading_config.get('poll_seconds', 5)
+        decision_guard_cfg = strategy_cfg.get("decision_guard", {})
 
         def _as_list(value):
             if value is None:
@@ -233,6 +236,8 @@ def main():
             strategy,
             exchange,
             risk_manager,
+            decision_guard=DashboardDecisionGuard(decision_guard_cfg),
+            snapshot_store=SignalSnapshotStore(decision_guard_cfg.get("snapshots_path")),
             timeframe=timeframe,
             timeframes=timeframes_meta,
             preferred_timeframe=preferred_timeframe_key,
