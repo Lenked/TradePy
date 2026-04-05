@@ -56,26 +56,66 @@ strategy:
       tp_atr: 3.5
 
 risk:
-  max_daily_loss_pct: 0.03
-  max_consecutive_losses: 3
-  max_trades_per_day: 20
+  max_daily_loss_pct: 0.02
+  max_daily_loss_usd: 60
+  max_consecutive_losses: 2
+  max_trades_per_day: 8
   # Per-symbol daily trade limits
   max_trades_per_day_by_symbol:
-    BTCUSDm: 4
-    XAUUSDm: 4
-    USOILm: 4
+    BTCUSDm: 3
+    XAUUSDm: 2
+    USOILm: 2
+    EURUSDm: 2
+    NVDAm: 1
   max_open_trades_per_symbol: 1
-  max_global_open_positions: 5
+  max_global_open_positions: 3
   cooldown_minutes_after_loss: 30          # base for all symbols
-  global_cooldown_minutes_after_loss: 8    # small global freeze to prevent spirals
+  global_cooldown_minutes_after_loss: 15   # small global freeze to prevent spirals
   one_trade_per_symbol_per_day: false
-  cooldown_minutes_after_trade_per_symbol: 240
+  cooldown_minutes_after_trade_per_symbol: 0
   # Disable daily profit lock for now (set to >0 to re-enable)
   daily_profit_target_usd: 0
   profit_lock_mode: "cooldown_hours"
   profit_lock_hours: 6
   trading_timezone: "Africa/Douala"
   daily_reset_hour: 0
+  trading_session:
+    enabled: true
+    start_hour: 16
+    start_minute: 0
+    end_hour: 6
+    end_minute: 0
+  trading_session_by_symbol:
+    BTCUSDm:
+      enabled: true
+      start_hour: 16
+      start_minute: 0
+      end_hour: 6
+      end_minute: 0
+    XAUUSDm:
+      enabled: true
+      start_hour: 16
+      start_minute: 0
+      end_hour: 23
+      end_minute: 0
+    USOILm:
+      enabled: true
+      start_hour: 16
+      start_minute: 0
+      end_hour: 22
+      end_minute: 0
+    EURUSDm:
+      enabled: true
+      start_hour: 16
+      start_minute: 0
+      end_hour: 23
+      end_minute: 0
+    NVDAm:
+      enabled: true
+      start_hour: 16
+      start_minute: 0
+      end_hour: 22
+      end_minute: 0
   state_path: "runtime/state.json"
 
   max_spread_points: 35
@@ -93,33 +133,33 @@ risk:
 
   cooldown_overrides_by_symbol:
     BTCUSDm: 5
-    XAUUSDm: 10
-    USOILm: 10
+    XAUUSDm: 15
+    USOILm: 20
+    EURUSDm: 10
+    NVDAm: 15
 
   # Hard stop by symbol if realized PnL for the trading day drops below -limit
   symbol_daily_loss_limit_usd_by_symbol:
-    XAUUSDm: 20
-
-  # Temporary safe mode by symbol (date inclusive, YYYY-MM-DD)
-  symbol_safe_mode_by_symbol:
-    XAUUSDm:
-      enabled_until: "2026-03-10"
-      max_trades_per_day: 2
-      cooldown_after_trade_minutes: 120
-      cooldown_after_loss_minutes: 120
-      volume_multiplier: 0.5
-      daily_loss_limit_usd: 20
+    BTCUSDm: 20
+    XAUUSDm: 15
+    USOILm: 10
+    EURUSDm: 8
+    NVDAm: 8
 
   # Symbol-specific risk overrides
   max_open_trades_per_symbol_by_symbol:
-    BTCUSDm: 1
+    BTCUSDm: 2
     XAUUSDm: 1
     USOILm: 1
+    EURUSDm: 1
+    NVDAm: 1
 
   cooldown_after_trade_overrides_by_symbol:
-    BTCUSDm: 30
-    XAUUSDm: 45
-    USOILm: 45
+    BTCUSDm: 0
+    XAUUSDm: 15
+    USOILm: 20
+    EURUSDm: 10
+    NVDAm: 30
 
   position_sizing:
     defaults:

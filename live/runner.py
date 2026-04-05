@@ -41,6 +41,7 @@ class LiveRunner:
         self._daily_start_equity = None
         self._daily_date = None
         self._last_decision_trace_time = {}  # Track when decision trace was last logged per symbol/timeframe
+        self._last_guard_status = {}
         self._open_positions_snapshot = {}
         self._open_trades = {}
         self._reporter = TradeReporter()
@@ -97,11 +98,51 @@ class LiveRunner:
         closed_time = df.index[-2]  # last CLOSED candle
         bar_key = (symbol, timeframe_key or "default")
         last_processed_time = self._last_closed_bar_times.get(bar_key)
+
+        # First sight of a symbol/timeframe should establish a baseline, not trigger a trade
+        if last_processed_time is None:
+            self._last_closed_bar_times[bar_key] = closed_time
+            return False
         
-        if last_processed_time is None or closed_time > last_processed_time:
+        if closed_time > last_processed_time:
             self._last_closed_bar_times[bar_key] = closed_time
             return True
         return False
+
+    @staticmethod
+    def _analysis_view(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        if len(df) >= 2:
+            closed_df = df.iloc[:-1].copy()
+            if not closed_df.empty:
+                return closed_df
+        return df.copy()
+
+    def _log_model_guard_result(self, symbol: str, timeframe_key: str, guard_result: dict) -> None:
+        if not isinstance(guard_result, dict) or not guard_result.get("enabled"):
+            return
+
+        status_key = (symbol, timeframe_key or "default")
+        status_signature = (
+            bool(guard_result.get("active")),
+            str(guard_result.get("mode")),
+            str(guard_result.get("reason")),
+            guard_result.get("score"),
+            bool(guard_result.get("would_block")),
+        )
+        last_signature = self._last_guard_status.get(status_key)
+        should_log = bool(guard_result.get("active")) or last_signature != status_signature
+        if not should_log:
+            return
+
+        self.logger.logger.info(
+            f"MODEL_GUARD - Symbol: {symbol} | TF: {timeframe_key or 'default'} | "
+            f"Target: {guard_result.get('target')} | Score: {guard_result.get('score')} | "
+            f"Mode: {guard_result.get('mode')} | WouldBlock: {guard_result.get('would_block')} | "
+            f"Reason: {guard_result.get('reason')}"
+        )
+        self._last_guard_status[status_key] = status_signature
 
     def _already_traded_on_bar(self, symbol: str, bar_time: pd.Timestamp) -> bool:
         last_trade_time = self._last_trade_bar_time.get(symbol)
@@ -476,19 +517,19 @@ class LiveRunner:
         if self._available_symbols:
             self._current_symbol = self._available_symbols[0]
 
-        # Get initial market data to set up startup grace period
-        if self._current_symbol:
+        # Get initial market data to set up startup grace period across all symbol/timeframe pairs
+        if self._available_symbols:
             timeframes = self.timeframes if self.timeframes else [{"key": None, "value": self.timeframe}]
-            for tf in timeframes:
-                tf_key = tf.get("key")
-                tf_value = tf.get("value")
-                if tf_value is None:
-                    continue
-                df = self.exchange.get_rates(self._current_symbol, tf_value, count=300)
-                if df is not None and not df.empty and len(df) >= 3:
-                    # Store the last closed bar time for startup grace period
-                    bar_key = (self._current_symbol, tf_key or "default")
-                    self._last_closed_bar_times[bar_key] = df.index[-2]
+            for initial_symbol in self._available_symbols:
+                for tf in timeframes:
+                    tf_key = tf.get("key")
+                    tf_value = tf.get("value")
+                    if tf_value is None:
+                        continue
+                    df = self.exchange.get_rates(initial_symbol, tf_value, count=300)
+                    if df is not None and not df.empty and len(df) >= 3:
+                        bar_key = (initial_symbol, tf_key or "default")
+                        self._last_closed_bar_times[bar_key] = df.index[-2]
 
         try:
             while True:
@@ -574,11 +615,13 @@ class LiveRunner:
                         df = self.exchange.get_rates(symbol, tf_value, count=300)
                         if df is None or df.empty:
                             continue
+                        analysis_df = self._analysis_view(df)
                         is_new = self._is_new_closed_bar(df, symbol, tf_key)
                         tf_data.append({
                             "tf_key": tf_key,
                             "tf_value": tf_value,
                             "df": df,
+                            "analysis_df": analysis_df,
                             "is_new": is_new,
                             "closed_bar_time": df.index[-2] if len(df) >= 2 else None,
                         })
@@ -618,15 +661,6 @@ class LiveRunner:
                             self.logger.error(f"KILL SWITCH TRIGGERED: {decision}")
                             time.sleep(self.poll_seconds)
                             continue
-
-                    # Symbol-level position check: block only if this symbol already has an open position
-                    if open_positions_count > 0:
-                        self.logger.info(
-                            f"[{datetime.now().strftime('%A')}] {symbol} | "
-                            f"HOLD (Position already open for symbol: {open_positions_count}) | "
-                            f"GlobalOpen={global_open_positions_active}"
-                        )
-                        continue
 
                     # Default values for decision trace
                     signal = "HOLD"  # Will be updated if new bar
@@ -701,11 +735,11 @@ class LiveRunner:
                                             import inspect
                                             decision_sig = inspect.signature(self.strategy.generate_decision)
                                             if "symbol" in decision_sig.parameters:
-                                                decision = self.strategy.generate_decision(candidate["df"], symbol=symbol)
+                                                decision = self.strategy.generate_decision(candidate["analysis_df"], symbol=symbol)
                                             else:
-                                                decision = self.strategy.generate_decision(candidate["df"])
+                                                decision = self.strategy.generate_decision(candidate["analysis_df"])
                                         except (TypeError, ValueError):
-                                            decision = self.strategy.generate_decision(candidate["df"])
+                                            decision = self.strategy.generate_decision(candidate["analysis_df"])
 
                                         if isinstance(decision, dict):
                                             candidate["decision"] = decision
@@ -716,7 +750,7 @@ class LiveRunner:
                                         else:
                                             candidate["signal"] = decision or "HOLD"
                                     else:
-                                        candidate["signal"] = self.strategy.generate_signal(candidate["df"])
+                                        candidate["signal"] = self.strategy.generate_signal(candidate["analysis_df"])
                                         if candidate["signal"] in ("BUY", "SELL"):
                                             candidate["confidence"] = 0.55
                                 except AttributeError:
@@ -733,7 +767,10 @@ class LiveRunner:
                                 hold_candidate = self._select_preferred_candidate(new_bar_candidates)
                                 if hold_candidate:
                                     df = hold_candidate["df"]
+                                    analysis_df = hold_candidate["analysis_df"]
                                     timeframe_key = hold_candidate["tf_key"]
+                                else:
+                                    analysis_df = self._analysis_view(df)
                                 signal = "HOLD"
                                 confidence = hold_candidate.get("confidence") if hold_candidate else None
                                 decision_source = hold_candidate.get("decision_source") if hold_candidate else None
@@ -744,7 +781,7 @@ class LiveRunner:
                                         hold_reason_msg = f" ({hold_candidate.get('decision_reason')})"
                                     elif hasattr(self.strategy, 'hold_reason'):
                                         try:
-                                            reason = self.strategy.hold_reason(df)
+                                            reason = self.strategy.hold_reason(analysis_df)
                                             if reason:
                                                 hold_reason_msg = f" ({reason})"
                                         except Exception as e:
@@ -798,6 +835,7 @@ class LiveRunner:
 
                             # Use chosen timeframe for trading logic
                             df = chosen_candidate["df"]
+                            analysis_df = chosen_candidate["analysis_df"]
                             timeframe_key = chosen_candidate["tf_key"]
                             signal = chosen_candidate.get("signal", "HOLD")
                             closed_bar_time = chosen_candidate.get("closed_bar_time")
@@ -814,7 +852,7 @@ class LiveRunner:
                                     hold_reason_msg = f" ({chosen_candidate.get('decision_reason')})"
                                 elif hasattr(self.strategy, 'hold_reason'):
                                     try:
-                                        reason = self.strategy.hold_reason(df)
+                                        reason = self.strategy.hold_reason(analysis_df)
                                         if reason:
                                             hold_reason_msg = f" ({reason})"
                                     except Exception as e:
@@ -839,11 +877,11 @@ class LiveRunner:
                                             import inspect
                                             sig = inspect.signature(self.strategy.compute_sl_tp)
                                             if "symbol" in sig.parameters:
-                                                sl, tp = self.strategy.compute_sl_tp(df, signal, symbol=symbol)
+                                                sl, tp = self.strategy.compute_sl_tp(analysis_df, signal, symbol=symbol)
                                             else:
-                                                sl, tp = self.strategy.compute_sl_tp(df, signal)
+                                                sl, tp = self.strategy.compute_sl_tp(analysis_df, signal)
                                         except (TypeError, ValueError):
-                                            sl, tp = self.strategy.compute_sl_tp(df, signal)
+                                            sl, tp = self.strategy.compute_sl_tp(analysis_df, signal)
                                         sl_valid = sl is not None and sl > 0
                                         tp_valid = tp is not None and tp > 0
                                     else:
@@ -856,7 +894,7 @@ class LiveRunner:
 
                                 # Validate SL/TP logic
                                 if sl is not None and tp is not None and sl_valid and tp_valid:
-                                    current_price = df['close'].iloc[-2]  # Last closed price
+                                    current_price = float(analysis_df['close'].iloc[-1])
                                     if signal == "BUY":
                                         # BUY: sl < price < tp
                                         if not (sl < current_price < tp):
@@ -871,7 +909,7 @@ class LiveRunner:
                             # Calculate volume if needed
                             if signal in ("BUY", "SELL"):
                                 try:
-                                    entry_price = float(df["close"].iloc[-2]) if len(df) >= 2 else float(df["close"].iloc[-1])
+                                    entry_price = float(analysis_df["close"].iloc[-1])
                                     if self.risk_manager is not None and hasattr(self.risk_manager, "compute_position_size"):
                                         volume = self.risk_manager.compute_position_size(
                                             symbol=symbol,
@@ -899,9 +937,9 @@ class LiveRunner:
                                                 compute_kwargs["sl"] = sl
                                             if "tp" in volume_sig.parameters:
                                                 compute_kwargs["tp"] = tp
-                                            volume = self.strategy.compute_volume(df, signal, snap.equity, **compute_kwargs)
+                                            volume = self.strategy.compute_volume(analysis_df, signal, snap.equity, **compute_kwargs)
                                         except (TypeError, ValueError):
-                                            volume = self.strategy.compute_volume(df, signal, snap.equity)
+                                            volume = self.strategy.compute_volume(analysis_df, signal, snap.equity)
                                     elif volume <= 0:
                                         self.logger.logger.warning(f"No volume calculator available for {symbol}")
                                 except Exception as e:
@@ -916,6 +954,7 @@ class LiveRunner:
                                             signal, sl, tp, snap,
                                             symbol=symbol,
                                             df=df,
+                                            reference_price=entry_price,
                                             exchange=self.exchange,
                                             now=datetime.now(),
                                             symbol_open_positions_count=open_positions_count,
@@ -934,13 +973,7 @@ class LiveRunner:
                             if self.decision_guard is not None and signal in ("BUY", "SELL") and volume > 0:
                                 try:
                                     guard_result = self.decision_guard.evaluate(symbol=symbol, side=signal, volume=volume)
-                                    if guard_result.get("enabled"):
-                                        self.logger.logger.info(
-                                            f"MODEL_GUARD - Symbol: {symbol} | TF: {timeframe_key or 'default'} | "
-                                            f"Target: {guard_result.get('target')} | Score: {guard_result.get('score')} | "
-                                            f"Mode: {guard_result.get('mode')} | WouldBlock: {guard_result.get('would_block')} | "
-                                            f"Reason: {guard_result.get('reason')}"
-                                        )
+                                    self._log_model_guard_result(symbol, timeframe_key, guard_result)
                                     if guard_result.get("active") and guard_result.get("mode") == "enforce" and guard_result.get("would_block"):
                                         risk_allowed = False
                                         risk_reason = f"model_big_loss_block:{guard_result.get('score')}"

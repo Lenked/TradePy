@@ -18,6 +18,15 @@ def test_daily_loss_blocks_trade():
     assert reason == "max_daily_loss_pct"
 
 
+def test_daily_loss_usd_blocks_trade():
+    rm = RiskManager({"max_daily_loss_usd": 50})
+    now = datetime(2026, 1, 30, 10, 0, 0)
+    rm.update_daily(daily_pnl=-55, daily_pnl_pct=-0.0055, now=now)
+    allowed, reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=now)
+    assert allowed is False
+    assert reason == "max_daily_loss_usd"
+
+
 def test_consecutive_losses_block_trade():
     rm = RiskManager({"max_consecutive_losses": 2})
     now = datetime(2026, 1, 30, 10, 0, 0)
@@ -47,6 +56,80 @@ def test_global_open_positions_allows_other_symbol():
         global_open_positions_count=1,
     )
     assert allowed is True
+
+
+def test_symbol_open_limit_allows_second_position_when_under_limit():
+    rm = RiskManager({"max_open_trades_per_symbol": 2})
+    now = datetime(2026, 1, 30, 10, 0, 0)
+    allowed, reason = rm.allow_trade(
+        "BUY", 1.0, 2.0, None, now=now,
+        symbol="BTCUSDm",
+        symbol_open_positions_count=1,
+        global_open_positions_count=1,
+    )
+    assert allowed is True
+
+
+def test_overnight_trading_session_blocks_outside_hours():
+    rm = RiskManager(
+        {
+            "trading_timezone": "Africa/Douala",
+            "trading_session": {
+                "enabled": True,
+                "start_hour": 16,
+                "end_hour": 6,
+            },
+        }
+    )
+    now = datetime(2026, 1, 30, 12, 0, 0)
+    allowed, reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=now, symbol="BTCUSDm")
+    assert allowed is False
+    assert reason == "outside_trading_session"
+
+
+def test_overnight_trading_session_allows_inside_hours():
+    rm = RiskManager(
+        {
+            "trading_timezone": "Africa/Douala",
+            "trading_session": {
+                "enabled": True,
+                "start_hour": 16,
+                "end_hour": 6,
+            },
+        }
+    )
+    now = datetime(2026, 1, 30, 18, 0, 0)
+    allowed, reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=now, symbol="BTCUSDm")
+    assert allowed is True
+    assert reason in {"No risk rules configured", "Trade allowed by risk management"}
+
+
+def test_symbol_specific_trading_session_overrides_global_session():
+    rm = RiskManager(
+        {
+            "trading_timezone": "Africa/Douala",
+            "trading_session": {
+                "enabled": True,
+                "start_hour": 16,
+                "end_hour": 6,
+            },
+            "trading_session_by_symbol": {
+                "XAUUSDm": {
+                    "enabled": True,
+                    "start_hour": 16,
+                    "end_hour": 23,
+                }
+            },
+        }
+    )
+    blocked_time = datetime(2026, 1, 30, 23, 30, 0)
+    allowed, reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=blocked_time, symbol="XAUUSDm")
+    assert allowed is False
+    assert reason == "outside_trading_session"
+
+    btc_allowed, btc_reason = rm.allow_trade("BUY", 1.0, 2.0, None, now=blocked_time, symbol="BTCUSDm")
+    assert btc_allowed is True
+    assert btc_reason in {"No risk rules configured", "Trade allowed by risk management"}
 
 
 def test_global_open_positions_blocks_when_limit_reached():

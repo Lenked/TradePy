@@ -197,13 +197,7 @@ class Broker(ExchangeInterface):
     def place_market_order(self, symbol: str, side: str, volume: float, sl: float, tp: float, 
                           comment: str = "TradePy Live") -> OrderResult:
         """Place a market order with mandatory stop loss and take profit"""
-        
-        # Anti-duplication: Check if we already have an open position for this symbol
-        existing_positions = self.positions(symbol)
-        if existing_positions:
-            self.logger.warning(f"Not placing new order for {symbol}: already has {len(existing_positions)} open position(s)")
-            return OrderResult(success=False, message="existing_position_blocked")
-        
+
         # Anti-duplication: Check if we just placed an order for this symbol recently (same candle)
         current_time = pd.Timestamp.now()
         if symbol in self._last_order_times:

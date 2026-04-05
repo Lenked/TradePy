@@ -20,6 +20,7 @@ class RiskManager:
         config = config or {}
         self.rules: List[RiskRule] = []
         self.max_daily_loss_pct = float(config.get("max_daily_loss_pct", 0.03))
+        self.max_daily_loss_usd = float(config.get("max_daily_loss_usd", 0.0))
         self.max_consecutive_losses = int(config.get("max_consecutive_losses", 3))
         self.max_trades_per_day = int(config.get("max_trades_per_day", 10))
         self.max_trades_per_day_by_symbol = config.get("max_trades_per_day_by_symbol", {})
@@ -75,6 +76,12 @@ class RiskManager:
         self.profit_lock_hours = int(config.get("profit_lock_hours", 6))
         self.trading_timezone = str(config.get("trading_timezone", "UTC"))
         self.daily_reset_hour = int(config.get("daily_reset_hour", 0))
+        self.trading_session = config.get("trading_session", {})
+        if not isinstance(self.trading_session, dict):
+            self.trading_session = {}
+        self.trading_session_by_symbol = config.get("trading_session_by_symbol", {})
+        if not isinstance(self.trading_session_by_symbol, dict):
+            self.trading_session_by_symbol = {}
         self.state_path = config.get("state_path")
 
         self._current_day: Optional[date] = None
@@ -130,6 +137,45 @@ class RiskManager:
         if now.time() < reset_time:
             return (now.date() - timedelta(days=1))
         return now.date()
+
+    def _normalize_now_to_trading_timezone(self, now: Optional[datetime]) -> datetime:
+        if now is None:
+            now = datetime.now()
+        tz = self._get_tz()
+        if tz is not None and now.tzinfo is None:
+            return now.replace(tzinfo=tz)
+        if tz is not None and now.tzinfo is not None:
+            return now.astimezone(tz)
+        return now
+
+    def _get_effective_trading_session(self, symbol: Optional[str]) -> Dict[str, Any]:
+        session = dict(self.trading_session) if isinstance(self.trading_session, dict) else {}
+        if symbol and isinstance(self.trading_session_by_symbol, dict):
+            symbol_session = self.trading_session_by_symbol.get(symbol)
+            if isinstance(symbol_session, dict):
+                session.update(symbol_session)
+        return session
+
+    def _is_within_trading_session(self, now: Optional[datetime], symbol: Optional[str] = None) -> bool:
+        session = self._get_effective_trading_session(symbol)
+        if not session or not bool(session.get("enabled", False)):
+            return True
+
+        local_now = self._normalize_now_to_trading_timezone(now)
+        start_hour = int(session.get("start_hour", 0))
+        start_minute = int(session.get("start_minute", 0))
+        end_hour = int(session.get("end_hour", 0))
+        end_minute = int(session.get("end_minute", 0))
+
+        start_time = dt_time(start_hour, start_minute)
+        end_time = dt_time(end_hour, end_minute)
+        current_time = local_now.time()
+
+        if start_time == end_time:
+            return True
+        if start_time < end_time:
+            return start_time <= current_time < end_time
+        return current_time >= start_time or current_time < end_time
 
     def _get_active_symbol_safe_mode(self, symbol: Optional[str], now: Optional[datetime]) -> Optional[Dict[str, Any]]:
         if not symbol or not isinstance(self.symbol_safe_mode_by_symbol, dict):
@@ -561,10 +607,13 @@ class RiskManager:
         
         # Use the datetime value for comparisons below
         now = now_param
+        symbol = context.get("symbol")
+
+        if not self._is_within_trading_session(now, symbol=symbol):
+            return False, "outside_trading_session"
 
         symbol_open_positions_count = context.get("symbol_open_positions_count", 0)
         global_open_positions_count = context.get("global_open_positions_count", None)
-        symbol = context.get("symbol")
         safe_mode = self._get_active_symbol_safe_mode(symbol, now)
         if symbol:
             cooldown_after_trade = self.cooldown_minutes_after_trade_per_symbol
@@ -627,6 +676,8 @@ class RiskManager:
 
         if self.max_daily_loss_pct and self._daily_pnl_pct <= -self.max_daily_loss_pct:
             return False, "max_daily_loss_pct"
+        if self.max_daily_loss_usd and self._daily_pnl <= -abs(self.max_daily_loss_usd):
+            return False, "max_daily_loss_usd"
 
         if self.one_trade_per_symbol_per_day and symbol and symbol in self._traded_symbols_today:
             return False, "symbol_day_lock"
@@ -671,10 +722,10 @@ class RiskManager:
 
         exchange = context.get("exchange")
         df = context.get("df")
-        reference_price = None
-        if df is not None and len(df) >= 2:
+        reference_price = context.get("reference_price")
+        if reference_price is None and df is not None and len(df) >= 2:
             reference_price = float(df["close"].iloc[-2])
-        elif df is not None and len(df) >= 1:
+        elif reference_price is None and df is not None and len(df) >= 1:
             reference_price = float(df["close"].iloc[-1])
 
         if signal in ("BUY", "SELL"):
