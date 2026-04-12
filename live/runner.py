@@ -44,6 +44,8 @@ class LiveRunner:
         self._last_guard_status = {}
         self._open_positions_snapshot = {}
         self._open_trades = {}
+        self._session_close_attempts = {}
+        self._session_close_retry_seconds = 60
         self._reporter = TradeReporter()
 
         # Initialize rate-limited logger to reduce "waiting for new bar" noise
@@ -455,6 +457,7 @@ class LiveRunner:
 
             if ticket in self._open_trades:
                 self._open_trades.pop(ticket, None)
+            self._session_close_attempts.pop(ticket, None)
 
         self._open_positions_snapshot = current
 
@@ -472,6 +475,113 @@ class LiveRunner:
             if pos_symbol == symbol:
                 count += 1
         return count
+
+    @staticmethod
+    def _format_session_window(session: dict) -> str:
+        if not isinstance(session, dict):
+            return "unknown"
+        start_hour = int(session.get("start_hour", 0))
+        start_minute = int(session.get("start_minute", 0))
+        end_hour = int(session.get("end_hour", 0))
+        end_minute = int(session.get("end_minute", 0))
+        return f"{start_hour:02d}:{start_minute:02d}-{end_hour:02d}:{end_minute:02d}"
+
+    def _close_positions_outside_session(self, positions, now: datetime) -> bool:
+        if self.risk_manager is None or not hasattr(self.risk_manager, "is_within_trading_session"):
+            return False
+        if not hasattr(self.exchange, "close_position"):
+            return False
+
+        current_tickets = set()
+        close_attempted = False
+        now_ts = time.time()
+
+        for pos in positions or []:
+            info = self._normalize_position(pos)
+            ticket = info.get("ticket")
+            symbol = info.get("symbol")
+            side = info.get("side")
+            volume = float(info.get("volume", 0.0) or 0.0)
+
+            if ticket:
+                current_tickets.add(ticket)
+
+            if not ticket or not symbol or not side or volume <= 0:
+                continue
+
+            session = {}
+            if hasattr(self.risk_manager, "get_effective_trading_session"):
+                try:
+                    session = self.risk_manager.get_effective_trading_session(symbol)
+                except Exception:
+                    session = {}
+
+            if not session or not bool(session.get("enabled", False)):
+                self._session_close_attempts.pop(ticket, None)
+                continue
+
+            try:
+                within_session = self.risk_manager.is_within_trading_session(now, symbol=symbol)
+            except Exception as exc:
+                self.logger.logger.warning(
+                    f"SESSION_CHECK_FAILED - Ticket: {ticket} | Symbol: {symbol} | Error: {exc}"
+                )
+                continue
+
+            if within_session:
+                self._session_close_attempts.pop(ticket, None)
+                continue
+
+            last_attempt = self._session_close_attempts.get(ticket)
+            if last_attempt is not None and (now_ts - last_attempt) < self._session_close_retry_seconds:
+                continue
+
+            session_window = self._format_session_window(session)
+            self.logger.logger.warning(
+                f"SESSION_ENDED - Ticket: {ticket} | Symbol: {symbol} | Session: {session_window} | "
+                f"Closing open {side} position"
+            )
+
+            try:
+                result = self.exchange.close_position(
+                    ticket=ticket,
+                    symbol=symbol,
+                    volume=volume,
+                    side=side,
+                    comment="TradePy Session End",
+                )
+            except Exception as exc:
+                self.logger.logger.error(
+                    f"SESSION_CLOSE_ERROR - Ticket: {ticket} | Symbol: {symbol} | Error: {exc}"
+                )
+                continue
+
+            close_attempted = True
+            success = bool(getattr(result, "success", result))
+            if success:
+                self._session_close_attempts[ticket] = now_ts
+                details = getattr(result, "details", {}) or {}
+                if ticket in self._open_positions_snapshot and details.get("profit") is not None:
+                    try:
+                        self._open_positions_snapshot[ticket]["profit"] = float(details.get("profit"))
+                    except Exception:
+                        pass
+                self.logger.logger.info(
+                    f"SESSION_CLOSE_SENT - Ticket: {ticket} | Symbol: {symbol} | "
+                    f"Result: {getattr(result, 'message', 'ok')}"
+                )
+            else:
+                self._session_close_attempts.pop(ticket, None)
+                self.logger.logger.error(
+                    f"SESSION_CLOSE_FAILED - Ticket: {ticket} | Symbol: {symbol} | "
+                    f"Reason: {getattr(result, 'message', '') or getattr(result, 'comment', 'unknown_error')}"
+                )
+
+        stale_tickets = [ticket for ticket in self._session_close_attempts if ticket not in current_tickets]
+        for ticket in stale_tickets:
+            self._session_close_attempts.pop(ticket, None)
+
+        return close_attempted
 
     def run(self):
         """Run the live trading loop"""
@@ -582,12 +692,16 @@ class LiveRunner:
                 self._reset_daily_if_needed(snap.equity)
                 daily_pnl = (snap.equity - self._daily_start_equity) if self._daily_start_equity is not None else 0.0
                 daily_pnl_pct = (daily_pnl / self._daily_start_equity) if self._daily_start_equity else 0.0
+                loop_now = datetime.now()
                 if self.risk_manager is not None:
-                    self.risk_manager.update_daily(daily_pnl, daily_pnl_pct, datetime.now())
+                    self.risk_manager.update_daily(daily_pnl, daily_pnl_pct, loop_now)
 
                 # Check open positions globally (for reporting only)
                 all_positions = self.exchange.positions()
                 self._sync_positions(all_positions)
+                if self._close_positions_outside_session(all_positions, now=loop_now):
+                    all_positions = self.exchange.positions()
+                    self._sync_positions(all_positions)
 
                 # Iterate through available symbols to find trading opportunity
                 signal_found = False

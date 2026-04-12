@@ -213,6 +213,115 @@ class MT5Executor(LiveExchangeInterface):
             price = float((tick.ask + tick.bid) / 2.0)
         return float(abs(price - reference_price) / point)
 
+    def close_position(
+        self,
+        ticket: str,
+        symbol: str,
+        volume: float,
+        side: str,
+        comment: str = "TradePy Session End",
+    ) -> OrderResult:
+        if not ticket:
+            return OrderResult(success=False, message="invalid_ticket")
+
+        resolved = self._resolve_symbol(symbol)
+        if not resolved:
+            return OrderResult(success=False, order_id=str(ticket), message=f"symbol_select_failed: {mt5.last_error()}")
+
+        symbol_info = mt5.symbol_info(resolved)
+        if symbol_info is None:
+            self.logger.error(f"MT5_SYMBOL_INFO_FAILED - Could not get symbol info for {resolved}")
+            return OrderResult(success=False, order_id=str(ticket), message=f"symbol_info_failed: {resolved}")
+
+        side_upper = (side or "").upper()
+        if side_upper == "BUY":
+            order_type = mt5.ORDER_TYPE_SELL
+        elif side_upper == "SELL":
+            order_type = mt5.ORDER_TYPE_BUY
+        else:
+            return OrderResult(success=False, order_id=str(ticket), message="invalid_side")
+
+        tick_info = mt5.symbol_info_tick(resolved)
+        if tick_info is None:
+            return OrderResult(success=False, order_id=str(ticket), message="missing_tick")
+
+        price = float(tick_info.bid) if side_upper == "BUY" else float(tick_info.ask)
+        normalized_volume = self._normalize_volume(volume, symbol_info)
+        try:
+            position_id = int(ticket)
+        except (TypeError, ValueError):
+            return OrderResult(success=False, order_id=str(ticket), message="invalid_ticket")
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": resolved,
+            "volume": float(normalized_volume),
+            "type": order_type,
+            "position": position_id,
+            "price": price,
+            "deviation": 20,
+            "magic": 234000,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_FOK,
+        }
+
+        if self.dry_run:
+            self.logger.info(
+                f"MT5_DRY_RUN_CLOSE_SIMULATED - Ticket: {ticket} - {resolved} | "
+                f"CloseSide: {order_type} | Volume: {normalized_volume} | Comment: {comment}"
+            )
+            return OrderResult(
+                success=True,
+                order_id=str(ticket),
+                retcode=None,
+                comment=comment,
+                request=request,
+                message="dry_run_close_simulated",
+            )
+
+        result = mt5.order_send(request)
+        if result is None:
+            self.logger.error(
+                f"MT5_CLOSE_FAILED - Ticket: {ticket} - Symbol: {resolved} - Retcode: N/A - "
+                f"Comment: order_send returned None"
+            )
+            return OrderResult(
+                success=False,
+                order_id=str(ticket),
+                retcode=None,
+                comment="order_send returned None",
+                request=request,
+                message="order_send_none",
+            )
+
+        retcode = getattr(result, "retcode", None)
+        deal_id = getattr(result, "deal", None) or getattr(result, "order", None) or getattr(result, "ticket", None)
+        result_comment = getattr(result, "comment", "")
+        success_codes = {getattr(mt5, "TRADE_RETCODE_DONE", None), getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", None)}
+        success = retcode in success_codes
+
+        if success:
+            self.logger.info(
+                f"MT5_CLOSE_SENT - Ticket: {ticket} - {resolved} | Volume: {normalized_volume} | "
+                f"Retcode: {retcode} | Deal: {deal_id}"
+            )
+        else:
+            self.logger.error(
+                f"MT5_CLOSE_FAILED - Ticket: {ticket} - Symbol: {resolved} - "
+                f"Retcode: {retcode} - Comment: {result_comment}"
+            )
+
+        return OrderResult(
+            success=success,
+            order_id=str(deal_id) if deal_id is not None else str(ticket),
+            retcode=retcode,
+            comment=result_comment or comment,
+            request=request,
+            message="position_closed" if success else "position_close_failed",
+            details={"result": result},
+        )
+
     def _normalize_volume(self, volume: float, symbol_info) -> float:
         """
         Normalize volume based on symbol's volume constraints.

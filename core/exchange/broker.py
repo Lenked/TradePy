@@ -6,6 +6,7 @@ import pandas as pd
 from typing import Optional
 from ..models import AccountSnapshot, OrderResult, SymbolTradeConstraints
 import time
+from datetime import datetime
 
 
 class Broker(ExchangeInterface):
@@ -265,6 +266,77 @@ class Broker(ExchangeInterface):
         self._last_order_times[symbol] = current_time
         
         return OrderResult(success=True, order_id=position_id, message="simulated_order", comment=comment)
+
+    def close_position(
+        self,
+        ticket: str,
+        symbol: str,
+        volume: float,
+        side: str,
+        comment: str = "TradePy Session End",
+    ) -> OrderResult:
+        """Close an existing simulated position at the current market price."""
+        if not ticket:
+            return OrderResult(success=False, message="invalid_ticket")
+
+        target = None
+        for position in self._positions:
+            position_ticket = str(position.get("ticket") or position.get("id") or "")
+            if position_ticket == str(ticket):
+                target = position
+                break
+
+        if target is None:
+            return OrderResult(success=False, order_id=str(ticket), message="position_not_found")
+
+        resolved_symbol = symbol or target.get("symbol")
+        exit_price = self.get_current_price(resolved_symbol)
+        entry_price = float(target.get("entry_price", exit_price))
+        position_volume = float(target.get("volume", volume or 0.0))
+        position_side = str(target.get("side", side or "")).upper()
+
+        if position_side == "BUY":
+            pnl = (float(exit_price) - entry_price) * position_volume
+        elif position_side == "SELL":
+            pnl = (entry_price - float(exit_price)) * position_volume
+        else:
+            return OrderResult(success=False, order_id=str(ticket), message="invalid_side")
+
+        target["pnl"] = float(pnl)
+        target["close_time"] = datetime.now()
+        target["close_price"] = float(exit_price)
+
+        self.current_balance += float(pnl)
+        self.current_equity = self.current_balance
+
+        self._positions = [
+            pos for pos in self._positions
+            if str(pos.get("ticket") or pos.get("id") or "") != str(ticket)
+        ]
+        self.orders_history.append(
+            {
+                "symbol": resolved_symbol,
+                "side": "SELL" if position_side == "BUY" else "BUY",
+                "volume": position_volume,
+                "entry_price": exit_price,
+                "comment": comment,
+                "timestamp": datetime.now(),
+                "status": "closed",
+                "position_id": str(ticket),
+                "pnl": float(pnl),
+            }
+        )
+        self.logger.info(
+            f"SIM_POSITION_CLOSED - Ticket: {ticket} - {resolved_symbol} | Side: {position_side} | "
+            f"Volume: {position_volume} | Exit: {exit_price} | PnL: {pnl:.5f} | Comment: {comment}"
+        )
+        return OrderResult(
+            success=True,
+            order_id=str(ticket),
+            message="simulated_close",
+            comment=comment,
+            details={"profit": float(pnl), "exit_price": float(exit_price)},
+        )
 
     def get_historical_data(self, symbol: str, timeframe: str, start_date: str, end_date: str):
         """Get historical market data for backtesting"""

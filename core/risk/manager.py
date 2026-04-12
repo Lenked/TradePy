@@ -156,6 +156,10 @@ class RiskManager:
                 session.update(symbol_session)
         return session
 
+    def get_effective_trading_session(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Return the merged trading session applied to the provided symbol."""
+        return dict(self._get_effective_trading_session(symbol))
+
     def _is_within_trading_session(self, now: Optional[datetime], symbol: Optional[str] = None) -> bool:
         session = self._get_effective_trading_session(symbol)
         if not session or not bool(session.get("enabled", False)):
@@ -176,6 +180,10 @@ class RiskManager:
         if start_time < end_time:
             return start_time <= current_time < end_time
         return current_time >= start_time or current_time < end_time
+
+    def is_within_trading_session(self, now: Optional[datetime], symbol: Optional[str] = None) -> bool:
+        """Public wrapper used by runners and orchestration logic."""
+        return self._is_within_trading_session(now, symbol=symbol)
 
     def _get_active_symbol_safe_mode(self, symbol: Optional[str], now: Optional[datetime]) -> Optional[Dict[str, Any]]:
         if not symbol or not isinstance(self.symbol_safe_mode_by_symbol, dict):

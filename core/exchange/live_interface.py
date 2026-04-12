@@ -52,6 +52,18 @@ class LiveExchangeInterface(ABC):
         """Place a market order with mandatory stop loss and take profit"""
         pass
 
+    @abstractmethod
+    def close_position(
+        self,
+        ticket: str,
+        symbol: str,
+        volume: float,
+        side: str,
+        comment: str = "TradePy Session End",
+    ) -> OrderResult:
+        """Close an open position at market using the opposite side."""
+        pass
+
 
 class BacktestDataInterface(ABC):
     """Interface for backtesting data operations - separate from live operations"""
