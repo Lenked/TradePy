@@ -11,6 +11,7 @@ from core.utils.symbol_schedule import get_symbols_for_today
 from utils.logger import RateLimitedLogger
 from core.exchange.live_interface import LiveExchangeInterface
 from core.reporting.trade_reporter import TradeReporter
+from core.trading.auto_close_scheduler import AutoCloseScheduler
 
 
 class LiveRunner:
@@ -47,6 +48,9 @@ class LiveRunner:
         self._session_close_attempts = {}
         self._session_close_retry_seconds = 60
         self._reporter = TradeReporter()
+        
+        # Initialize auto-close scheduler to close trades after 90 minutes
+        self.auto_close_scheduler = AutoCloseScheduler(exchange, timeout_minutes=90)
 
         # Initialize rate-limited logger to reduce "waiting for new bar" noise
         self.logger = RateLimitedLogger("LiveRunner", min_interval=60)  # Log every 60 seconds
@@ -457,6 +461,8 @@ class LiveRunner:
 
             if ticket in self._open_trades:
                 self._open_trades.pop(ticket, None)
+                # Unregister the trade from auto-close scheduler
+                self.auto_close_scheduler.unregister_trade(ticket)
             self._session_close_attempts.pop(ticket, None)
 
         self._open_positions_snapshot = current
@@ -700,6 +706,13 @@ class LiveRunner:
                 all_positions = self.exchange.positions()
                 self._sync_positions(all_positions)
                 if self._close_positions_outside_session(all_positions, now=loop_now):
+                    all_positions = self.exchange.positions()
+                    self._sync_positions(all_positions)
+                
+                # Check and close expired trades (auto-close after 90 minutes)
+                expired_results = self.auto_close_scheduler.check_and_close_expired_trades()
+                if expired_results:
+                    # Refresh positions after auto-closing trades
                     all_positions = self.exchange.positions()
                     self._sync_positions(all_positions)
 
@@ -1179,6 +1192,8 @@ class LiveRunner:
                                                     "open_time": datetime.now(),
                                                     "snapshot_id": snapshot_id,
                                                 }
+                                                # Register the trade with auto-close scheduler
+                                                self.auto_close_scheduler.register_trade(trade_id, datetime.now())
                                                 if self.snapshot_store is not None:
                                                     self.snapshot_store.append_event(
                                                         "trade_opened",
