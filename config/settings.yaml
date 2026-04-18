@@ -10,6 +10,7 @@ trading:
   # Conflict resolution: prefer this timeframe if signals disagree
   preferred_timeframe: 15
   poll_seconds: 5
+  min_order_interval_seconds: 1
 
 strategy:
   # Default ATR multiples for SL/TP (réduire les sorties en SL = donner plus de marge)
@@ -54,6 +55,46 @@ strategy:
     XAUUSDm:
       sl_atr: 2.5
       tp_atr: 3.5
+  scalping:
+    enabled: true
+    break_even_trigger_pct: 0.25
+    break_even_offset_usd: 0.10
+    secure_profit_trigger_pct: 0.50
+    secure_profit_lock_pct: 0.40
+    trailing_stop_enabled: true
+    trailing_stop_distance_atr_multiplier: 0.45
+    fast_exit_on_reversal: true
+    reversal_candles_required: 1
+    symbol_overrides:
+      BTCUSDm:
+        tp_multiplier: 0.35
+        trailing_stop_distance_atr_multiplier: 0.40
+      XAUUSDm:
+        tp_multiplier: 0.45
+        trailing_stop_distance_atr_multiplier: 0.45
+      USOILm:
+        tp_multiplier: 0.40
+        trailing_stop_distance_atr_multiplier: 0.45
+  intra_bar_trading:
+    enabled: true
+    max_trades_per_bar: 5
+    min_seconds_between_trades: 8
+    allow_reentry_same_direction: true
+    allow_reentry_after_tp: true
+    allow_reverse_trade_same_bar: false
+    require_price_move_pct_between_entries: 0.08
+    require_new_high_low_breakout: true
+    cooldown_after_loss_seconds: 30
+    symbol_overrides:
+      BTCUSDm:
+        max_trades_per_bar: 7
+        min_seconds_between_trades: 5
+      XAUUSDm:
+        max_trades_per_bar: 5
+        min_seconds_between_trades: 10
+      USOILm:
+        max_trades_per_bar: 4
+        min_seconds_between_trades: 15
 
 risk:
   max_daily_loss_pct: 0.02
@@ -68,7 +109,7 @@ risk:
     EURUSDm: 2
     NVDAm: 1
   max_open_trades_per_symbol: 1
-  max_global_open_positions: 3
+  max_global_open_positions: 2
   cooldown_minutes_after_loss: 30          # base for all symbols
   global_cooldown_minutes_after_loss: 15   # small global freeze to prevent spirals
   one_trade_per_symbol_per_day: false
@@ -148,7 +189,7 @@ risk:
 
   # Symbol-specific risk overrides
   max_open_trades_per_symbol_by_symbol:
-    BTCUSDm: 2
+    BTCUSDm: 1
     XAUUSDm: 1
     USOILm: 1
     EURUSDm: 1

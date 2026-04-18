@@ -128,6 +128,7 @@ def main():
         rsi_buy_max=strategy_cfg.get("rsi_buy_max"),
         rsi_sell_min=strategy_cfg.get("rsi_sell_min"),
         ai_decision_config=strategy_cfg.get("ai_decision", {}),
+        scalping_config=strategy_cfg.get("scalping", {}),
     )
     risk_manager = RiskManager(config.get('risk', {}))
     
@@ -241,7 +242,9 @@ def main():
             timeframe=timeframe,
             timeframes=timeframes_meta,
             preferred_timeframe=preferred_timeframe_key,
-            poll_seconds=poll_seconds
+            poll_seconds=poll_seconds,
+            scalping_config=strategy_cfg.get("scalping", {}),
+            intra_bar_config=strategy_cfg.get("intra_bar_trading", {}),
         )
         # Live trading would be initiated here
         print(f"Running in {args.mode} mode...")

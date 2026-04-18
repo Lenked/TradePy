@@ -64,6 +64,18 @@ class LiveExchangeInterface(ABC):
         """Close an open position at market using the opposite side."""
         pass
 
+    @abstractmethod
+    def update_position_protection(
+        self,
+        ticket: str,
+        symbol: str,
+        sl: float,
+        tp: float,
+        comment: str = "TradePy Protection Update",
+    ) -> OrderResult:
+        """Update stop-loss / take-profit protection for an open position."""
+        pass
+
 
 class BacktestDataInterface(ABC):
     """Interface for backtesting data operations - separate from live operations"""

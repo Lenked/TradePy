@@ -9,6 +9,7 @@ def _build_dummy_mt5():
     dummy.ORDER_TIME_GTC = 0
     dummy.ORDER_FILLING_FOK = 0
     dummy.TRADE_ACTION_DEAL = 1
+    dummy.TRADE_ACTION_SLTP = 2
     dummy.TRADE_RETCODE_DONE = 10009
     dummy.TRADE_RETCODE_DONE_PARTIAL = 10010
     dummy._order_send_called = 0
@@ -66,4 +67,20 @@ def test_mt5_executor_dry_run_close_skips_order_send(monkeypatch):
 
     assert result.success is True
     assert result.message == "dry_run_close_simulated"
+    assert dummy._order_send_called == 0
+
+
+def test_mt5_executor_dry_run_protection_update_skips_order_send(monkeypatch):
+    dummy = _build_dummy_mt5()
+
+    sys.modules["MetaTrader5"] = dummy
+    sys.modules.pop("core.execution.mt5_executor", None)
+
+    from core.execution.mt5_executor import MT5Executor
+
+    executor = MT5Executor(dry_run=True)
+    result = executor.update_position_protection("123456", "EURUSD", 1.22, 1.30)
+
+    assert result.success is True
+    assert result.message == "dry_run_protection_update"
     assert dummy._order_send_called == 0

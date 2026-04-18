@@ -5,8 +5,10 @@ Live runner for TradePy bot
 import time
 import logging
 import os
+from dataclasses import asdict
 from datetime import datetime
 import pandas as pd
+from core.models import TradeState
 from core.utils.symbol_schedule import get_symbols_for_today
 from utils.logger import RateLimitedLogger
 from core.exchange.live_interface import LiveExchangeInterface
@@ -19,7 +21,7 @@ class LiveRunner:
     def __init__(self, strategy, exchange: LiveExchangeInterface, risk_manager=None, kill_switch=None,
                  decision_guard=None, snapshot_store=None,
                  symbol: str = "AUTO", timeframe=None, timeframes=None, preferred_timeframe=None,
-                 poll_seconds: int = 5):
+                 poll_seconds: int = 5, scalping_config=None, intra_bar_config=None):
         self.strategy = strategy
         self.exchange = exchange
         self.risk_manager = risk_manager
@@ -32,11 +34,15 @@ class LiveRunner:
         self.timeframes = self._normalize_timeframes(timeframes, timeframe)
         self.preferred_timeframe_key = preferred_timeframe
         self.poll_seconds = poll_seconds
+        self.scalping_config = scalping_config if isinstance(scalping_config, dict) else {}
+        self.intra_bar_config = intra_bar_config if isinstance(intra_bar_config, dict) else {}
 
         self._available_symbols = []
         self._current_symbol = None
         self._last_closed_bar_times = {}  # Track last processed bar time per symbol/timeframe
         self._last_trade_bar_time = {}  # Track last bar where a trade was attempted per symbol
+        self._bar_trade_state = {}
+        self._last_closed_trade_by_symbol = {}
         self._startup_grace_period_active = True
         self._daily_start_equity = None
         self._daily_date = None
@@ -91,6 +97,411 @@ class LiveRunner:
         if fallback_timeframe is None:
             return []
         return [{"key": None, "value": fallback_timeframe}]
+
+    @staticmethod
+    def _safe_float(value, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return float(default)
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _is_scalping_enabled(self) -> bool:
+        return bool(self.scalping_config.get("enabled", False))
+
+    def _is_intra_bar_enabled(self) -> bool:
+        return bool(self.intra_bar_config.get("enabled", False))
+
+    def _get_symbol_config(self, base_config: dict, symbol: str) -> dict:
+        config = dict(base_config) if isinstance(base_config, dict) else {}
+        symbol_overrides = config.pop("symbol_overrides", {})
+        if symbol and isinstance(symbol_overrides, dict):
+            symbol_config = symbol_overrides.get(symbol, {})
+            if isinstance(symbol_config, dict):
+                config.update(symbol_config)
+        return config
+
+    def _get_scalping_symbol_config(self, symbol: str) -> dict:
+        return self._get_symbol_config(self.scalping_config, symbol)
+
+    def _get_intra_bar_symbol_config(self, symbol: str) -> dict:
+        return self._get_symbol_config(self.intra_bar_config, symbol)
+
+    def _management_timeframe(self) -> dict:
+        timeframes = self.timeframes if self.timeframes else [{"key": None, "value": self.timeframe}]
+        valid = [tf for tf in timeframes if tf.get("value") is not None]
+        if not valid:
+            return {"key": None, "value": self.timeframe}
+        return min(valid, key=lambda tf: tf.get("value", 10**9))
+
+    def _normalize_bar_time(self, bar_time):
+        if bar_time is None:
+            return None
+        try:
+            return pd.Timestamp(bar_time)
+        except Exception:
+            return bar_time
+
+    def _get_or_reset_bar_state(self, symbol: str, bar_time):
+        normalized_bar_time = self._normalize_bar_time(bar_time)
+        state = self._bar_trade_state.get(symbol)
+        if state is None or state.get("bar_time") != normalized_bar_time:
+            state = {
+                "bar_time": normalized_bar_time,
+                "count": 0,
+                "last_trade_time": None,
+                "last_direction": None,
+                "last_entry_price": None,
+                "last_exit_reason": None,
+            }
+            self._bar_trade_state[symbol] = state
+        return state
+
+    @staticmethod
+    def _is_opposite_side(first: str, second: str) -> bool:
+        first_upper = str(first or "").upper()
+        second_upper = str(second or "").upper()
+        return {first_upper, second_upper} == {"BUY", "SELL"}
+
+    def _compute_sl_tp_quality_score(self, entry_price: float, sl: float, tp: float) -> float:
+        if entry_price is None or sl is None or tp is None:
+            return 0.0
+        risk = abs(float(entry_price) - float(sl))
+        reward = abs(float(tp) - float(entry_price))
+        if risk <= 0 or reward <= 0:
+            return 0.0
+        rr = reward / risk
+        return max(0.0, min(1.0, rr / 2.0))
+
+    def _current_price_for_side(self, symbol: str, side: str):
+        price = None
+        spread = None
+        if hasattr(self.exchange, "get_tick"):
+            try:
+                tick = self.exchange.get_tick(symbol)
+            except Exception:
+                tick = None
+            if tick is not None:
+                bid = self._safe_float(getattr(tick, "bid", None), 0.0)
+                ask = self._safe_float(getattr(tick, "ask", None), 0.0)
+                spread = abs(ask - bid) if bid and ask else None
+                if str(side or "").upper() == "BUY":
+                    price = bid or ask
+                elif str(side or "").upper() == "SELL":
+                    price = ask or bid
+                else:
+                    price = bid or ask
+        if not price and hasattr(self.exchange, "get_current_price"):
+            try:
+                price = self._safe_float(self.exchange.get_current_price(symbol), 0.0)
+            except Exception:
+                price = None
+        if not price:
+            tf = self._management_timeframe()
+            try:
+                df = self.exchange.get_rates(symbol, tf.get("value"), count=2)
+            except Exception:
+                df = None
+            if df is not None and not df.empty:
+                price = self._safe_float(df["close"].iloc[-1], 0.0)
+        return price, spread
+
+    def _compute_position_pnl(self, side: str, entry_price: float, current_price: float, volume: float, fallback=None) -> float:
+        if fallback is not None:
+            fallback_value = self._safe_float(fallback, 0.0)
+            if abs(fallback_value) > 0:
+                return fallback_value
+        if entry_price is None or current_price is None:
+            return 0.0
+        if str(side or "").upper() == "BUY":
+            return (float(current_price) - float(entry_price)) * float(volume)
+        return (float(entry_price) - float(current_price)) * float(volume)
+
+    def _favorable_price_distance(self, side: str, entry_price: float, current_price: float) -> float:
+        if entry_price is None or current_price is None:
+            return 0.0
+        if str(side or "").upper() == "BUY":
+            return float(current_price) - float(entry_price)
+        return float(entry_price) - float(current_price)
+
+    def _is_more_protective_stop(self, side: str, candidate_sl: float, current_sl: float) -> bool:
+        if candidate_sl is None:
+            return False
+        if current_sl in (None, 0):
+            return True
+        if str(side or "").upper() == "BUY":
+            return float(candidate_sl) > float(current_sl) + 1e-9
+        return float(candidate_sl) < float(current_sl) - 1e-9
+
+    def _build_indicator_snapshot(self, df: pd.DataFrame) -> dict:
+        if df is None or df.empty or len(df) < 3:
+            return {}
+        close = df["close"].astype(float)
+        high_low_df = df[["high", "low", "close"]].astype(float)
+        volume_series = df["volume"].astype(float) if "volume" in df.columns else pd.Series([1.0] * len(df), index=df.index)
+
+        rsi_period = getattr(self.strategy, "rsi_period", 14)
+        atr_period = getattr(self.strategy, "atr_period", 14)
+        if hasattr(self.strategy, "calculate_rsi"):
+            rsi_series = self.strategy.calculate_rsi(close, rsi_period)
+        else:
+            delta = close.diff()
+            gain = delta.where(delta > 0, 0.0).rolling(window=rsi_period).mean()
+            loss = (-delta.where(delta < 0, 0.0)).rolling(window=rsi_period).mean()
+            rs = gain / loss.replace(0, pd.NA)
+            rsi_series = (100 - (100 / (1 + rs))).fillna(50.0)
+        if hasattr(self.strategy, "calculate_atr"):
+            atr_series = self.strategy.calculate_atr(high_low_df, atr_period)
+        else:
+            atr_series = (high_low_df["high"] - high_low_df["low"]).rolling(window=atr_period).mean()
+        if hasattr(self.strategy, "calculate_macd_histogram"):
+            macd_hist_series = self.strategy.calculate_macd_histogram(close)
+        else:
+            ema_fast = close.ewm(span=12, adjust=False).mean()
+            ema_slow = close.ewm(span=26, adjust=False).mean()
+            macd_line = ema_fast - ema_slow
+            macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+            macd_hist_series = macd_line - macd_signal
+
+        current_close = self._safe_float(close.iloc[-1], 0.0)
+        previous_close = self._safe_float(close.iloc[-2], current_close)
+        current_rsi = self._safe_float(rsi_series.iloc[-1], 50.0)
+        previous_rsi = self._safe_float(rsi_series.iloc[-2], current_rsi)
+        current_macd_hist = self._safe_float(macd_hist_series.iloc[-1], 0.0)
+        previous_macd_hist = self._safe_float(macd_hist_series.iloc[-2], current_macd_hist)
+        atr = self._safe_float(atr_series.iloc[-1], max(current_close * 0.001, 1e-6))
+        volume_now = self._safe_float(volume_series.iloc[-1], 0.0)
+        volume_avg_5 = self._safe_float(volume_series.tail(5).mean(), volume_now)
+
+        return {
+            "atr": max(atr, max(current_close * 0.001, 1e-6)),
+            "current_close": current_close,
+            "previous_close": previous_close,
+            "current_rsi": current_rsi,
+            "previous_rsi": previous_rsi,
+            "current_macd_hist": current_macd_hist,
+            "previous_macd_hist": previous_macd_hist,
+            "volume_now": volume_now,
+            "volume_avg_5": volume_avg_5,
+            "last_bar_open": self._safe_float(df["open"].iloc[-1], current_close),
+            "last_bar_high": self._safe_float(df["high"].iloc[-1], current_close),
+            "last_bar_low": self._safe_float(df["low"].iloc[-1], current_close),
+            "previous_bar_high": self._safe_float(df["high"].iloc[-2], current_close),
+            "previous_bar_low": self._safe_float(df["low"].iloc[-2], current_close),
+        }
+
+    def _momentum_reversal_signal(self, side: str, df: pd.DataFrame, symbol: str) -> dict:
+        config = self._get_scalping_symbol_config(symbol)
+        if not config.get("fast_exit_on_reversal", False):
+            return {"triggered": False, "reasons": []}
+
+        snapshot = self._build_indicator_snapshot(df)
+        if not snapshot:
+            return {"triggered": False, "reasons": []}
+
+        reasons = []
+        side_upper = str(side or "").upper()
+        rsi_turn = abs(snapshot["current_rsi"] - snapshot["previous_rsi"])
+        if side_upper == "BUY" and snapshot["previous_rsi"] - snapshot["current_rsi"] >= 3.0:
+            reasons.append("rsi_rollover")
+        if side_upper == "SELL" and snapshot["current_rsi"] - snapshot["previous_rsi"] >= 3.0:
+            reasons.append("rsi_rollover")
+
+        previous_macd_abs = max(abs(snapshot["previous_macd_hist"]), 1e-6)
+        macd_force_drop = (previous_macd_abs - abs(snapshot["current_macd_hist"])) / previous_macd_abs
+        if macd_force_drop >= 0.20:
+            reasons.append("macd_force_loss")
+
+        volume_avg = max(snapshot["volume_avg_5"], 1e-6)
+        if snapshot["volume_now"] <= volume_avg * 0.70:
+            reasons.append("volume_drop")
+
+        current_bar_body = snapshot["current_close"] - snapshot["last_bar_open"]
+        reversal_candles_required = max(1, int(config.get("reversal_candles_required", 1) or 1))
+        opposite_candle = False
+        if side_upper == "BUY":
+            opposite_candle = current_bar_body < 0
+            failed_breakout = snapshot["current_close"] < snapshot["previous_bar_high"] and snapshot["last_bar_high"] > snapshot["previous_bar_high"]
+        else:
+            opposite_candle = current_bar_body > 0
+            failed_breakout = snapshot["current_close"] > snapshot["previous_bar_low"] and snapshot["last_bar_low"] < snapshot["previous_bar_low"]
+        if opposite_candle and reversal_candles_required <= 1:
+            reasons.append("opposite_candle")
+        if failed_breakout:
+            reasons.append("failed_breakout")
+
+        return {
+            "triggered": bool(reasons),
+            "reasons": reasons,
+            "rsi_turn": rsi_turn,
+            "macd_force_drop": macd_force_drop,
+            "volume_ratio": snapshot["volume_now"] / volume_avg,
+        }
+
+    def _default_trade_state(self, ticket: str, position_info: dict) -> dict:
+        entry_price = self._safe_float(position_info.get("entry_price"), 0.0)
+        sl = self._safe_float(position_info.get("sl"), 0.0)
+        tp = self._safe_float(position_info.get("tp"), 0.0)
+        state = TradeState(
+            trade_id=str(ticket),
+            symbol=str(position_info.get("symbol", "")),
+            side=str(position_info.get("side", "")),
+            volume=self._safe_float(position_info.get("volume"), 0.0),
+            open_time=position_info.get("open_time"),
+            position_ticket=str(ticket),
+            entry_price=entry_price,
+            initial_sl=sl,
+            initial_tp=tp,
+            current_sl=sl,
+            current_tp=tp,
+            initial_risk_distance=abs(entry_price - sl) if entry_price and sl else 0.0,
+            initial_tp_distance=abs(tp - entry_price) if entry_price and tp else 0.0,
+        )
+        return asdict(state)
+
+    def _ensure_trade_state(self, ticket: str, position_info: dict) -> dict:
+        trade = self._open_trades.get(ticket)
+        if trade is None:
+            trade = self._default_trade_state(ticket, position_info)
+            self._open_trades[ticket] = trade
+        trade["position_ticket"] = str(ticket)
+        trade["symbol"] = position_info.get("symbol", trade.get("symbol"))
+        trade["side"] = position_info.get("side", trade.get("side"))
+        trade["volume"] = self._safe_float(position_info.get("volume"), trade.get("volume", 0.0))
+        if position_info.get("open_time") is not None:
+            trade["open_time"] = position_info.get("open_time")
+        if position_info.get("entry_price") not in (None, 0):
+            trade["entry_price"] = self._safe_float(position_info.get("entry_price"), trade.get("entry_price", 0.0))
+        if position_info.get("sl") not in (None, 0):
+            trade["current_sl"] = self._safe_float(position_info.get("sl"), trade.get("current_sl", 0.0))
+            if not trade.get("initial_sl"):
+                trade["initial_sl"] = trade["current_sl"]
+        if position_info.get("tp") not in (None, 0):
+            trade["current_tp"] = self._safe_float(position_info.get("tp"), trade.get("current_tp", 0.0))
+            if not trade.get("initial_tp"):
+                trade["initial_tp"] = trade["current_tp"]
+        if trade.get("entry_price") and trade.get("initial_tp") and not trade.get("initial_tp_distance"):
+            trade["initial_tp_distance"] = abs(float(trade["initial_tp"]) - float(trade["entry_price"]))
+        if trade.get("entry_price") and trade.get("initial_sl") and not trade.get("initial_risk_distance"):
+            trade["initial_risk_distance"] = abs(float(trade["entry_price"]) - float(trade["initial_sl"]))
+        return trade
+
+    def _prepare_trade_state(
+        self,
+        trade_id: str,
+        symbol: str,
+        side: str,
+        volume: float,
+        open_time: datetime,
+        snapshot_id,
+        timeframe_key,
+        entry_price: float,
+        sl: float,
+        tp: float,
+        decision: dict,
+        trade_context: dict,
+        bar_time,
+        spread_points,
+        reentry_count: int,
+    ) -> dict:
+        metrics = decision.get("metrics", {}) if isinstance(decision, dict) else {}
+        context = trade_context or {}
+        state = TradeState(
+            trade_id=str(trade_id),
+            symbol=str(symbol),
+            side=str(side),
+            volume=self._safe_float(volume),
+            open_time=open_time,
+            snapshot_id=snapshot_id,
+            position_ticket=str(trade_id),
+            timeframe_key=str(timeframe_key or "default"),
+            entry_bar_time=self._normalize_bar_time(bar_time),
+            entry_price=self._safe_float(entry_price),
+            initial_sl=self._safe_float(sl),
+            initial_tp=self._safe_float(tp),
+            current_sl=self._safe_float(sl),
+            current_tp=self._safe_float(tp),
+            initial_risk_distance=abs(float(entry_price) - float(sl)) if entry_price and sl else 0.0,
+            initial_tp_distance=abs(float(tp) - float(entry_price)) if entry_price and tp else 0.0,
+            atr_at_entry=self._safe_float(context.get("atr", metrics.get("atr"))),
+            rsi_at_entry=self._safe_float(context.get("rsi", metrics.get("rsi"))),
+            volume_ratio_at_entry=self._safe_float(context.get("volume_ratio", metrics.get("volume_ratio")), 1.0),
+            spread_at_entry=self._safe_float(spread_points),
+            signal_confidence=self._safe_float(decision.get("confidence")),
+            signal_force=self._safe_float(context.get("signal_force", metrics.get("signal_force", decision.get("confidence", 0.0)))),
+            trend_alignment_score=self._safe_float(context.get("trend_alignment_score", metrics.get("trend_alignment_score"))),
+            sl_tp_quality_score=self._safe_float(
+                context.get("sl_tp_quality_score", self._compute_sl_tp_quality_score(entry_price, sl, tp))
+            ),
+            reentry_count_same_bar=int(reentry_count or 0),
+        )
+        return asdict(state)
+
+    def _can_trade_on_bar(self, symbol: str, side: str, bar_time, now: datetime, entry_price: float, breakout_ok: bool = True):
+        normalized_bar_time = self._normalize_bar_time(bar_time)
+        if normalized_bar_time is None:
+            return False, "missing_bar_time"
+
+        if not self._is_intra_bar_enabled():
+            if self._already_traded_on_bar(symbol, normalized_bar_time):
+                return False, "already_traded_on_bar"
+            return True, "bar_trade_allowed"
+
+        config = self._get_intra_bar_symbol_config(symbol)
+        state = self._get_or_reset_bar_state(symbol, normalized_bar_time)
+        max_trades_per_bar = max(1, int(config.get("max_trades_per_bar", 1) or 1))
+        min_seconds_between_trades = max(0.0, self._safe_float(config.get("min_seconds_between_trades"), 0.0))
+        allow_same_direction = bool(config.get("allow_reentry_same_direction", False))
+        allow_reentry_after_tp = bool(config.get("allow_reentry_after_tp", True))
+        allow_reverse = bool(config.get("allow_reverse_trade_same_bar", False))
+        require_move_pct = max(0.0, self._safe_float(config.get("require_price_move_pct_between_entries"), 0.0))
+        require_breakout = bool(config.get("require_new_high_low_breakout", False))
+        cooldown_after_loss = max(0.0, self._safe_float(config.get("cooldown_after_loss_seconds"), 0.0))
+
+        if state.get("count", 0) >= max_trades_per_bar:
+            return False, "max_trades_per_bar"
+
+        last_trade_time = state.get("last_trade_time")
+        if last_trade_time is not None and (now - last_trade_time).total_seconds() < min_seconds_between_trades:
+            return False, "min_seconds_between_trades"
+
+        if require_breakout and not breakout_ok:
+            return False, "breakout_not_confirmed"
+
+        last_closed_trade = self._last_closed_trade_by_symbol.get(symbol, {})
+        last_close_time = last_closed_trade.get("close_time")
+        if last_close_time is not None and self._safe_float(last_closed_trade.get("pnl"), 0.0) < 0:
+            if (now - last_close_time).total_seconds() < cooldown_after_loss:
+                return False, "cooldown_after_loss_seconds"
+
+        last_direction = state.get("last_direction")
+        if state.get("count", 0) > 0:
+            last_exit_reason = str(state.get("last_exit_reason") or "")
+            if not allow_reentry_after_tp and last_exit_reason in {"take_profit", "trailing_stop", "profit_lock", "break_even"}:
+                return False, "reentry_after_tp_blocked"
+            if self._is_opposite_side(last_direction, side) and not allow_reverse:
+                return False, "reverse_same_bar_blocked"
+            if str(last_direction or "").upper() == str(side or "").upper() and not allow_same_direction:
+                return False, "same_direction_reentry_blocked"
+            last_entry_price = self._safe_float(state.get("last_entry_price"), 0.0)
+            if require_move_pct > 0 and last_entry_price > 0:
+                move_pct = abs(float(entry_price) - last_entry_price) / last_entry_price * 100.0
+                if move_pct < require_move_pct:
+                    return False, "price_move_too_small"
+
+        return True, "intra_bar_allowed"
+
+    def _mark_trade_attempt(self, symbol: str, bar_time, side: str, now: datetime, entry_price: float, exit_reason: str = None) -> None:
+        normalized_bar_time = self._normalize_bar_time(bar_time)
+        self._last_trade_bar_time[symbol] = normalized_bar_time
+        state = self._get_or_reset_bar_state(symbol, normalized_bar_time)
+        state["count"] = int(state.get("count", 0) or 0) + 1
+        state["last_trade_time"] = now
+        state["last_direction"] = str(side or "").upper()
+        state["last_entry_price"] = self._safe_float(entry_price, 0.0)
+        if exit_reason:
+            state["last_exit_reason"] = exit_reason
 
     def _is_new_closed_bar(self, df: pd.DataFrame, symbol: str, timeframe_key: str = None) -> bool:
         """Check if there's a new closed bar for the specific symbol/timeframe"""
@@ -147,11 +558,15 @@ class LiveRunner:
         self._last_guard_status[status_key] = status_signature
 
     def _already_traded_on_bar(self, symbol: str, bar_time: pd.Timestamp) -> bool:
+        normalized_bar_time = self._normalize_bar_time(bar_time)
+        state = self._bar_trade_state.get(symbol)
+        if state is not None and state.get("bar_time") == normalized_bar_time and int(state.get("count", 0) or 0) > 0:
+            return True
         last_trade_time = self._last_trade_bar_time.get(symbol)
-        return last_trade_time is not None and bar_time <= last_trade_time
+        return last_trade_time is not None and normalized_bar_time <= last_trade_time
 
     def _mark_traded_on_bar(self, symbol: str, bar_time: pd.Timestamp) -> None:
-        self._last_trade_bar_time[symbol] = bar_time
+        self._mark_trade_attempt(symbol, bar_time, side="", now=datetime.now(), entry_price=0.0)
 
     @staticmethod
     def _flatten_mapping(prefix, payload):
@@ -206,6 +621,7 @@ class LiveRunner:
         if ticket in self._open_trades:
             trade = self._open_trades[ticket]
             trade["position_ticket"] = ticket
+            self._ensure_trade_state(ticket, position_info)
             return
 
         candidates = []
@@ -228,6 +644,7 @@ class LiveRunner:
         trade["position_ticket"] = ticket
         trade["requested_trade_id"] = old_key
         self._open_trades[ticket] = trade
+        self._ensure_trade_state(ticket, position_info)
 
     def _record_signal_snapshot(self, payload: dict) -> None:
         if self.snapshot_store is None:
@@ -381,6 +798,18 @@ class LiveRunner:
         return [self.symbol] if self.symbol else []
 
     def _normalize_position(self, pos):
+        def _normalize_open_time(value):
+            if value is None:
+                return None
+            if isinstance(value, datetime):
+                return value
+            if isinstance(value, pd.Timestamp):
+                return value.to_pydatetime()
+            try:
+                return datetime.fromtimestamp(float(value))
+            except Exception:
+                return value
+
         if isinstance(pos, dict):
             return {
                 "ticket": str(pos.get("ticket") or pos.get("id")),
@@ -388,7 +817,11 @@ class LiveRunner:
                 "profit": float(pos.get("pnl", 0.0)),
                 "volume": float(pos.get("volume", 0.0)),
                 "side": pos.get("side"),
-                "open_time": pos.get("open_time"),
+                "open_time": _normalize_open_time(pos.get("open_time")),
+                "entry_price": self._safe_float(pos.get("entry_price"), 0.0),
+                "current_price": self._safe_float(pos.get("price_current"), 0.0),
+                "sl": self._safe_float(pos.get("sl"), 0.0),
+                "tp": self._safe_float(pos.get("tp"), 0.0),
             }
         return {
             "ticket": str(getattr(pos, "ticket", "")),
@@ -396,7 +829,11 @@ class LiveRunner:
             "profit": float(getattr(pos, "profit", 0.0)),
             "volume": float(getattr(pos, "volume", 0.0)),
             "side": "BUY" if getattr(pos, "type", 0) == 0 else "SELL",
-            "open_time": getattr(pos, "time", None),
+            "open_time": _normalize_open_time(getattr(pos, "time", None)),
+            "entry_price": self._safe_float(getattr(pos, "price_open", None), 0.0),
+            "current_price": self._safe_float(getattr(pos, "price_current", None), 0.0),
+            "sl": self._safe_float(getattr(pos, "sl", None), 0.0),
+            "tp": self._safe_float(getattr(pos, "tp", None), 0.0),
         }
 
     def _sync_positions(self, positions):
@@ -405,6 +842,7 @@ class LiveRunner:
             info = self._normalize_position(pos)
             if info["ticket"]:
                 current[info["ticket"]] = info
+                self._ensure_trade_state(info["ticket"], info)
 
         previous_tickets = set(self._open_positions_snapshot.keys())
         new_tickets = [ticket for ticket in current.keys() if ticket not in previous_tickets]
@@ -417,7 +855,21 @@ class LiveRunner:
             pnl = closed.get("profit", 0.0)
             symbol = closed.get("symbol")
             closed_at = datetime.now()
-            trade_meta = self._open_trades.get(ticket, {})
+            trade_meta = self._open_trades.get(ticket, {}) or {}
+            exit_reason = (
+                trade_meta.get("pending_exit_reason")
+                or ("momentum_reversal" if trade_meta.get("momentum_reversal") else "")
+                or ("trailing_stop" if trade_meta.get("used_trailing") and pnl > 0 else "")
+                or ("profit_lock" if trade_meta.get("profit_locked") and pnl > 0 else "")
+                or ("break_even" if trade_meta.get("touched_break_even") and pnl >= 0 else "")
+                or ("take_profit" if pnl > 0 else "stop_loss")
+            )
+            duration_seconds = 0.0
+            if trade_meta.get("open_time") is not None:
+                try:
+                    duration_seconds = max(0.0, (closed_at - trade_meta.get("open_time")).total_seconds())
+                except Exception:
+                    duration_seconds = 0.0
 
             if self.risk_manager is not None:
                 self.risk_manager.record_trade_close(pnl, closed_at, symbol)
@@ -434,9 +886,46 @@ class LiveRunner:
                 symbol=symbol,
                 side=closed.get("side"),
                 volume=closed.get("volume", 0.0),
-                open_time=closed.get("open_time"),
+                open_time=trade_meta.get("open_time") or closed.get("open_time"),
                 close_time=closed_at,
                 pnl=pnl,
+                spread=trade_meta.get("spread_at_entry", 0.0),
+                atr=trade_meta.get("atr_at_entry", 0.0),
+                rsi=trade_meta.get("rsi_at_entry", 0.0),
+                volume_ratio=trade_meta.get("volume_ratio_at_entry", 1.0),
+                signal_force=trade_meta.get("signal_force", 0.0),
+                signal_confidence=trade_meta.get("signal_confidence", 0.0),
+                trend_alignment_score=trade_meta.get("trend_alignment_score", 0.0),
+                sl_tp_quality_score=trade_meta.get("sl_tp_quality_score", 0.0),
+                entry_price=trade_meta.get("entry_price", closed.get("entry_price", 0.0)),
+                exit_price=trade_meta.get("last_exit_price", closed.get("current_price", 0.0)),
+                sl=trade_meta.get("initial_sl", closed.get("sl", 0.0)),
+                tp=trade_meta.get("initial_tp", closed.get("tp", 0.0)),
+                max_drawdown=trade_meta.get("max_drawdown", 0.0),
+                max_profit_reached=trade_meta.get("max_profit_reached", 0.0),
+                profit_final=pnl,
+                duration_seconds=duration_seconds,
+                exit_reason=exit_reason,
+                touched_be=trade_meta.get("touched_break_even", False),
+                profit_locked=trade_meta.get("profit_locked", False),
+                used_trailing=trade_meta.get("used_trailing", False),
+                momentum_reversal=trade_meta.get("momentum_reversal", False),
+                bars_held=trade_meta.get("bars_held", 0),
+                reentry_count_same_bar=trade_meta.get("reentry_count_same_bar", 0),
+                timeframe_key=trade_meta.get("timeframe_key", "default"),
+            )
+            self._last_closed_trade_by_symbol[symbol] = {
+                "close_time": closed_at,
+                "pnl": pnl,
+                "exit_reason": exit_reason,
+            }
+            if trade_meta.get("entry_bar_time") is not None:
+                bar_state = self._get_or_reset_bar_state(symbol, trade_meta.get("entry_bar_time"))
+                bar_state["last_exit_reason"] = exit_reason
+
+            self.logger.logger.info(
+                f"MICRO_SCALP_EXIT - Ticket: {ticket} | Symbol: {symbol} | Side: {closed.get('side')} | "
+                f"PnL: {self._safe_float(pnl):.5f} | ExitReason: {exit_reason}"
             )
 
             if self.snapshot_store is not None:
@@ -449,9 +938,11 @@ class LiveRunner:
                         "symbol": symbol,
                         "side": closed.get("side"),
                         "volume": closed.get("volume", 0.0),
-                        "open_time": closed.get("open_time"),
+                        "open_time": trade_meta.get("open_time") or closed.get("open_time"),
                         "close_time": closed_at,
                         "pnl": pnl,
+                        "exit_reason": exit_reason,
+                        "trade_score": trade_meta.get("trade_score"),
                     },
                 )
 
@@ -583,6 +1074,219 @@ class LiveRunner:
 
         return close_attempted
 
+    def _build_intrabar_candidate(self, symbol: str, tf_data, now: datetime):
+        if not self._is_intra_bar_enabled() or self._startup_grace_period_active:
+            return None
+        if not tf_data:
+            return None
+
+        candidate = min(tf_data, key=lambda item: item.get("tf_value", 10**9))
+        df = candidate.get("df")
+        if df is None or df.empty or len(df) < 3:
+            return None
+
+        try:
+            if hasattr(self.strategy, "generate_decision"):
+                decision = self.strategy.generate_decision(df, symbol=symbol)
+            else:
+                signal = self.strategy.generate_signal(df)
+                decision = {"signal": signal, "confidence": 0.0, "source": "generate_signal", "reason": "intrabar"}
+        except Exception as exc:
+            self.logger.logger.warning(f"INTRABAR_DECISION_FAILED - Symbol: {symbol} | Error: {exc}")
+            return None
+
+        signal = decision.get("signal", "HOLD")
+        if signal not in ("BUY", "SELL"):
+            return None
+
+        entry_price, _ = self._current_price_for_side(symbol, signal)
+        if not entry_price:
+            entry_price = self._safe_float(df["close"].iloc[-1], 0.0)
+
+        current_bar_time = df.index[-1]
+        current_bar = df.iloc[-1]
+        previous_bar = df.iloc[-2]
+        if signal == "BUY":
+            breakout_ok = self._safe_float(current_bar.get("high"), 0.0) > self._safe_float(previous_bar.get("high"), 0.0)
+        else:
+            breakout_ok = self._safe_float(current_bar.get("low"), 0.0) < self._safe_float(previous_bar.get("low"), 0.0)
+
+        allowed, reason = self._can_trade_on_bar(
+            symbol=symbol,
+            side=signal,
+            bar_time=current_bar_time,
+            now=now,
+            entry_price=entry_price,
+            breakout_ok=breakout_ok,
+        )
+        if not allowed:
+            return None
+
+        return {
+            "tf_key": candidate.get("tf_key"),
+            "tf_value": candidate.get("tf_value"),
+            "df": df,
+            "analysis_df": df,
+            "is_new": False,
+            "is_intrabar": True,
+            "closed_bar_time": current_bar_time,
+            "current_bar_time": current_bar_time,
+            "decision": decision,
+            "signal": signal,
+            "confidence": self._safe_float(decision.get("confidence"), 0.0),
+            "decision_source": decision.get("source", "intrabar"),
+            "decision_reason": reason,
+        }
+
+    def _update_trade_extremes(self, trade: dict, position_info: dict, df: pd.DataFrame, current_price: float) -> None:
+        trade["bars_held"] = int(trade.get("bars_held", 0) or 0)
+        open_time = trade.get("open_time")
+        if open_time is not None and df is not None and not df.empty:
+            try:
+                trade["bars_held"] = int((df.index >= pd.Timestamp(open_time)).sum())
+            except Exception:
+                pass
+
+        current_pnl = self._compute_position_pnl(
+            side=trade.get("side"),
+            entry_price=trade.get("entry_price"),
+            current_price=current_price,
+            volume=trade.get("volume", 0.0),
+            fallback=position_info.get("profit"),
+        )
+        trade["max_profit_reached"] = max(self._safe_float(trade.get("max_profit_reached"), 0.0), current_pnl)
+        if current_pnl < 0:
+            trade["max_drawdown"] = max(self._safe_float(trade.get("max_drawdown"), 0.0), abs(current_pnl))
+
+    def _apply_scalping_management(self, positions, now: datetime) -> bool:
+        if not self._is_scalping_enabled():
+            return False
+        action_taken = False
+        rates_cache = {}
+
+        for pos in positions or []:
+            info = self._normalize_position(pos)
+            ticket = info.get("ticket")
+            symbol = info.get("symbol")
+            side = str(info.get("side", "")).upper()
+            volume = self._safe_float(info.get("volume"), 0.0)
+            if not ticket or not symbol or side not in ("BUY", "SELL") or volume <= 0:
+                continue
+
+            tf = self._management_timeframe()
+            cache_key = (symbol, tf.get("value"))
+            if cache_key not in rates_cache:
+                rates_cache[cache_key] = self.exchange.get_rates(symbol, tf.get("value"), count=300)
+            df = rates_cache.get(cache_key)
+            if df is None or df.empty or len(df) < 3:
+                continue
+
+            trade = self._ensure_trade_state(ticket, info)
+            current_price, _ = self._current_price_for_side(symbol, side)
+            current_price = current_price or self._safe_float(info.get("current_price"), 0.0) or self._safe_float(df["close"].iloc[-1], 0.0)
+            if current_price <= 0:
+                continue
+
+            self._update_trade_extremes(trade, info, df, current_price)
+
+            config = self._get_scalping_symbol_config(symbol)
+            entry_price = self._safe_float(trade.get("entry_price"), self._safe_float(info.get("entry_price"), 0.0))
+            current_sl = self._safe_float(trade.get("current_sl"), self._safe_float(info.get("sl"), 0.0))
+            current_tp = self._safe_float(trade.get("current_tp"), self._safe_float(info.get("tp"), 0.0))
+            initial_tp_distance = self._safe_float(trade.get("initial_tp_distance"), 0.0)
+            if initial_tp_distance <= 0 and entry_price and current_tp:
+                initial_tp_distance = abs(current_tp - entry_price)
+                trade["initial_tp_distance"] = initial_tp_distance
+            if initial_tp_distance <= 0:
+                continue
+
+            favorable_distance = self._favorable_price_distance(side, entry_price, current_price)
+            progress = favorable_distance / max(initial_tp_distance, 1e-6)
+            indicator_snapshot = self._build_indicator_snapshot(df)
+            atr = max(self._safe_float(indicator_snapshot.get("atr"), trade.get("atr_at_entry", 0.0)), max(current_price * 0.001, 1e-6))
+
+            desired_sl = current_sl
+            break_even_trigger = self._safe_float(config.get("break_even_trigger_pct"), 0.25)
+            break_even_offset = self._safe_float(config.get("break_even_offset_usd"), 0.0)
+            secure_profit_trigger = self._safe_float(config.get("secure_profit_trigger_pct"), 0.50)
+            secure_profit_lock_pct = self._safe_float(config.get("secure_profit_lock_pct"), 0.40)
+
+            if progress >= break_even_trigger and not trade.get("touched_break_even"):
+                candidate_sl = entry_price + break_even_offset if side == "BUY" else entry_price - break_even_offset
+                if self._is_more_protective_stop(side, candidate_sl, desired_sl):
+                    desired_sl = candidate_sl
+                trade["touched_break_even"] = True
+                self.logger.logger.info(
+                    f"TRADE_BREAK_EVEN_TRIGGERED - Ticket: {ticket} | Symbol: {symbol} | Side: {side} | "
+                    f"Progress: {progress:.2f} | NewSL: {candidate_sl}"
+                )
+
+            if progress >= secure_profit_trigger and not trade.get("profit_locked"):
+                profit_lock_distance = initial_tp_distance * secure_profit_lock_pct
+                candidate_sl = entry_price + profit_lock_distance if side == "BUY" else entry_price - profit_lock_distance
+                if self._is_more_protective_stop(side, candidate_sl, desired_sl):
+                    desired_sl = candidate_sl
+                trade["profit_locked"] = True
+                self.logger.logger.info(
+                    f"TRADE_PROFIT_LOCKED - Ticket: {ticket} | Symbol: {symbol} | Side: {side} | "
+                    f"Progress: {progress:.2f} | LockedPct: {secure_profit_lock_pct:.2f} | NewSL: {candidate_sl}"
+                )
+
+            if config.get("trailing_stop_enabled", False) and progress > 0:
+                trailing_distance = atr * self._safe_float(config.get("trailing_stop_distance_atr_multiplier"), 0.45)
+                trailing_sl = current_price - trailing_distance if side == "BUY" else current_price + trailing_distance
+                if self._is_more_protective_stop(side, trailing_sl, desired_sl):
+                    desired_sl = trailing_sl
+                    trade["used_trailing"] = True
+                    self.logger.logger.info(
+                        f"TRADE_TRAILING_STOP_UPDATED - Ticket: {ticket} | Symbol: {symbol} | Side: {side} | "
+                        f"ATR: {atr:.5f} | NewSL: {trailing_sl:.5f}"
+                    )
+
+            if desired_sl and self._is_more_protective_stop(side, desired_sl, current_sl):
+                try:
+                    result = self.exchange.update_position_protection(
+                        ticket=ticket,
+                        symbol=symbol,
+                        sl=desired_sl,
+                        tp=current_tp or trade.get("initial_tp", 0.0),
+                        comment="TradePy Micro-Scalp Protection",
+                    )
+                    if bool(getattr(result, "success", result)):
+                        trade["current_sl"] = desired_sl
+                        trade["last_protection_update"] = now
+                        action_taken = True
+                except Exception as exc:
+                    self.logger.logger.warning(
+                        f"PROTECTION_UPDATE_FAILED - Ticket: {ticket} | Symbol: {symbol} | Error: {exc}"
+                    )
+
+            reversal = self._momentum_reversal_signal(side, df, symbol)
+            if reversal.get("triggered"):
+                trade["momentum_reversal"] = True
+                trade["pending_exit_reason"] = "momentum_reversal"
+                trade["last_exit_price"] = current_price
+                self.logger.logger.info(
+                    f"TRADE_EXITED_ON_MOMENTUM_REVERSAL - Ticket: {ticket} | Symbol: {symbol} | "
+                    f"Reasons: {','.join(reversal.get('reasons', []))}"
+                )
+                try:
+                    result = self.exchange.close_position(
+                        ticket=ticket,
+                        symbol=symbol,
+                        volume=volume,
+                        side=side,
+                        comment="TradePy Momentum Reversal",
+                    )
+                    if bool(getattr(result, "success", result)):
+                        action_taken = True
+                except Exception as exc:
+                    self.logger.logger.error(
+                        f"MICRO_SCALP_EXIT_FAILED - Ticket: {ticket} | Symbol: {symbol} | Error: {exc}"
+                    )
+
+        return action_taken
+
     def run(self):
         """Run the live trading loop"""
         # Connect and perform startup check
@@ -702,6 +1406,9 @@ class LiveRunner:
                 if self._close_positions_outside_session(all_positions, now=loop_now):
                     all_positions = self.exchange.positions()
                     self._sync_positions(all_positions)
+                if self._apply_scalping_management(all_positions, now=loop_now):
+                    all_positions = self.exchange.positions()
+                    self._sync_positions(all_positions)
 
                 # Iterate through available symbols to find trading opportunity
                 signal_found = False
@@ -744,11 +1451,18 @@ class LiveRunner:
                         continue
 
                     new_bar_candidates = [c for c in tf_data if c["is_new"]]
+                    intrabar_candidate = None
                     has_new_bar = bool(new_bar_candidates)
-                    trace_pool = new_bar_candidates if has_new_bar else tf_data
+                    if not has_new_bar:
+                        intrabar_candidate = self._build_intrabar_candidate(symbol, tf_data, now=loop_now)
+                    evaluation_candidates = list(new_bar_candidates)
+                    if intrabar_candidate is not None:
+                        evaluation_candidates.append(intrabar_candidate)
+                    has_signal_evaluation = bool(evaluation_candidates)
+                    trace_pool = evaluation_candidates if has_signal_evaluation else tf_data
                     trace_candidate = self._select_preferred_candidate(trace_pool)
                     df = trace_candidate["df"]
-                    is_new_closed_bar = trace_candidate["is_new"]
+                    is_new_closed_bar = trace_candidate["is_new"] if trace_candidate is not None else False
                     timeframe_key = trace_candidate["tf_key"]
                     
                     # Count open positions for this symbol using global snapshot
@@ -806,9 +1520,9 @@ class LiveRunner:
                             kill_switch_reason = decision.get("reason", "Unknown reason")
                     
                     # Generate decision trace once per minute per symbol (with default values when no new bar)
-                    if has_new_bar:
+                    if has_signal_evaluation:
                         state = "evaluating"
-                        order_result = "evaluating_new_bar"
+                        order_result = "evaluating_new_bar" if has_new_bar else "evaluating_intrabar"
                     else:
                         state = "waiting_new_bar"
                         order_result = "waiting_for_new_bar"
@@ -825,9 +1539,9 @@ class LiveRunner:
                     )
 
                     # Only act on new closed bar (any timeframe) and after startup grace period
-                    if has_new_bar:
+                    if has_signal_evaluation:
                         # Disable startup grace period after first closed bar seen
-                        if self._startup_grace_period_active:
+                        if has_new_bar and self._startup_grace_period_active:
                             self._startup_grace_period_active = False
                             self.logger.info("Startup grace period ended. Ready to trade.")
 
@@ -837,8 +1551,10 @@ class LiveRunner:
                             hold_reason_msg = ""
                             selected_reason = "signal_selected"
                             
-                            # Generate signal per timeframe (new bars only)
-                            for candidate in new_bar_candidates:
+                            # Generate signal per timeframe (closed bars first, plus optional intrabar candidate)
+                            for candidate in evaluation_candidates:
+                                if candidate.get("decision") is not None:
+                                    continue
                                 candidate["signal"] = "HOLD"
                                 candidate["confidence"] = 0.0
                                 candidate["decision_source"] = "base_strategy"
@@ -875,10 +1591,12 @@ class LiveRunner:
                                     candidate["signal"] = "HOLD"
                                     candidate["decision_reason"] = f"strategy_signal_error: {e}"
 
-                            chosen_candidate, selected_reason = self._resolve_timeframe_signal(new_bar_candidates)
+                            chosen_candidate, selected_reason = self._resolve_timeframe_signal(evaluation_candidates)
+                            if chosen_candidate is not None and chosen_candidate.get("is_intrabar"):
+                                selected_reason = chosen_candidate.get("decision_reason", "intra_bar_signal")
                             if chosen_candidate is None:
                                 # No actionable signal or conflict
-                                hold_candidate = self._select_preferred_candidate(new_bar_candidates)
+                                hold_candidate = self._select_preferred_candidate(evaluation_candidates)
                                 if hold_candidate:
                                     df = hold_candidate["df"]
                                     analysis_df = hold_candidate["analysis_df"]
@@ -953,11 +1671,13 @@ class LiveRunner:
                             timeframe_key = chosen_candidate["tf_key"]
                             signal = chosen_candidate.get("signal", "HOLD")
                             closed_bar_time = chosen_candidate.get("closed_bar_time")
+                            trade_bar_time = chosen_candidate.get("current_bar_time") or (df.index[-1] if df is not None and not df.empty else closed_bar_time)
                             confidence = chosen_candidate.get("confidence")
                             decision_source = chosen_candidate.get("decision_source")
                             chosen_decision = chosen_candidate.get("decision", {})
                             snapshot_id = self.snapshot_store.next_snapshot_id(symbol, datetime.now()) if self.snapshot_store is not None else None
                             entry_price = None
+                            spread_points = None
                             guard_result = None
 
                             # Check for hold reason if strategy supports it
@@ -1023,7 +1743,13 @@ class LiveRunner:
                             # Calculate volume if needed
                             if signal in ("BUY", "SELL"):
                                 try:
-                                    entry_price = float(analysis_df["close"].iloc[-1])
+                                    market_entry_price, _ = self._current_price_for_side(symbol, signal)
+                                    entry_price = market_entry_price or float(analysis_df["close"].iloc[-1])
+                                    if hasattr(self.exchange, "estimate_spread_points"):
+                                        try:
+                                            spread_points = self.exchange.estimate_spread_points(symbol)
+                                        except Exception:
+                                            spread_points = None
                                     if self.risk_manager is not None and hasattr(self.risk_manager, "compute_position_size"):
                                         volume = self.risk_manager.compute_position_size(
                                             symbol=symbol,
@@ -1138,21 +1864,35 @@ class LiveRunner:
                                         f"Reason: Invalid computed volume"
                                     )
                                 elif risk_allowed and not kill_switch_triggered:
-                                    if self._already_traded_on_bar(symbol, closed_bar_time):
+                                    breakout_ok = True
+                                    if chosen_candidate.get("is_intrabar"):
+                                        breakout_ok = chosen_candidate.get("decision_reason") != "breakout_not_confirmed"
+                                    bar_allowed, bar_reason = self._can_trade_on_bar(
+                                        symbol=symbol,
+                                        side=signal,
+                                        bar_time=trade_bar_time,
+                                        now=datetime.now(),
+                                        entry_price=entry_price,
+                                        breakout_ok=breakout_ok,
+                                    )
+                                    if not bar_allowed:
                                         state = "risk_blocked"
-                                        order_result = "already_traded_on_bar"
-                                        self.logger.logger.info(f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Reason: already traded on bar {closed_bar_time}")
+                                        order_result = bar_reason
+                                        self.logger.logger.info(
+                                            f"NO_TRADE - Symbol: {symbol} | TF: {timeframe_key or 'default'} | Reason: {bar_reason}"
+                                        )
                                     else:
                                         # All conditions met, try to place order
                                         try:
-                                            self._mark_traded_on_bar(symbol, closed_bar_time)
+                                            order_now = datetime.now()
+                                            comment = "TradePy Ultra Scalp" if self._is_scalping_enabled() else "TradePy Live"
                                             ok = self.exchange.place_market_order(
                                                 symbol=symbol,
                                                 side=signal,
                                                 volume=volume,
                                                 sl=sl,
                                                 tp=tp,
-                                                comment="TradePy Live"
+                                                comment=comment
                                             )
                                             order_attempted = True
                                             if hasattr(ok, "success"):
@@ -1171,14 +1911,49 @@ class LiveRunner:
                                                 extra = f" | OrderID: {order_id}" if order_id else ""
                                                 self.logger.logger.info(f"ORDER_SENT - Symbol: {symbol} | TF: {timeframe_key or 'default'} | {signal} {volume} | SL: {sl} | TP: {tp}{extra}")
                                                 trade_id = order_id or f"{symbol}_{int(time.time())}"
-                                                self._open_trades[trade_id] = {
-                                                    "trade_id": trade_id,
-                                                    "symbol": symbol,
-                                                    "side": signal,
-                                                    "volume": volume,
-                                                    "open_time": datetime.now(),
-                                                    "snapshot_id": snapshot_id,
-                                                }
+                                                bar_state = self._get_or_reset_bar_state(symbol, trade_bar_time)
+                                                reentry_count = int(bar_state.get("count", 0) or 0)
+                                                trade_context = {}
+                                                if hasattr(self.strategy, "build_trade_context"):
+                                                    try:
+                                                        trade_context = self.strategy.build_trade_context(
+                                                            analysis_df,
+                                                            signal,
+                                                            symbol=symbol,
+                                                            sl=sl,
+                                                            tp=tp,
+                                                        )
+                                                    except Exception:
+                                                        trade_context = {}
+                                                self._open_trades[trade_id] = self._prepare_trade_state(
+                                                    trade_id=trade_id,
+                                                    symbol=symbol,
+                                                    side=signal,
+                                                    volume=volume,
+                                                    open_time=order_now,
+                                                    snapshot_id=snapshot_id,
+                                                    timeframe_key=timeframe_key,
+                                                    entry_price=entry_price,
+                                                    sl=sl,
+                                                    tp=tp,
+                                                    decision=chosen_decision,
+                                                    trade_context=trade_context,
+                                                    bar_time=trade_bar_time,
+                                                    spread_points=spread_points,
+                                                    reentry_count=reentry_count,
+                                                )
+                                                self._mark_trade_attempt(symbol, trade_bar_time, signal, order_now, entry_price)
+                                                if reentry_count > 0:
+                                                    self.logger.logger.info(
+                                                        f"TRADE_REENTRY_SAME_BAR - Symbol: {symbol} | Side: {signal} | "
+                                                        f"BarTime: {trade_bar_time} | ReentryCount: {reentry_count + 1}"
+                                                    )
+                                                if self._is_scalping_enabled():
+                                                    signal_force = self._safe_float(self._open_trades[trade_id].get("signal_force"), 0.0)
+                                                    self.logger.logger.info(
+                                                        f"ULTRA_SCALP_ENTRY - Symbol: {symbol} | TF: {timeframe_key or 'default'} | "
+                                                        f"Side: {signal} | Entry: {entry_price} | SignalForce: {signal_force:.4f}"
+                                                    )
                                                 if self.snapshot_store is not None:
                                                     self.snapshot_store.append_event(
                                                         "trade_opened",
@@ -1193,10 +1968,12 @@ class LiveRunner:
                                                             "entry_price": entry_price,
                                                             "sl": sl,
                                                             "tp": tp,
+                                                            "signal_force": self._open_trades[trade_id].get("signal_force", 0.0),
+                                                            "reentry_count_same_bar": self._open_trades[trade_id].get("reentry_count_same_bar", 0),
                                                         },
                                                     )
                                                 if self.risk_manager is not None:
-                                                    self.risk_manager.record_trade_open(datetime.now(), symbol)
+                                                    self.risk_manager.record_trade_open(order_now, symbol)
                                             else:
                                                 state = "order_failed"
                                                 order_result = "failed_place_market_order"

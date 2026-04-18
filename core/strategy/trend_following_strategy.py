@@ -28,6 +28,7 @@ class TrendFollowingStrategy(Strategy):
         rsi_buy_max: float = None,
         rsi_sell_min: float = None,
         ai_decision_config: dict = None,
+        scalping_config: dict = None,
     ):
         self.ema_short_period = int(ema_short_period)
         self.ema_long_period = int(ema_long_period)
@@ -39,6 +40,7 @@ class TrendFollowingStrategy(Strategy):
         self.rsi_buy_max = float(rsi_buy_max) if rsi_buy_max is not None else None
         self.rsi_sell_min = float(rsi_sell_min) if rsi_sell_min is not None else None
         self.ai_decision_config = ai_decision_config or {}
+        self.scalping_config = scalping_config or {}
         self.ai_decision_engine = HybridDecisionEngine(self.ai_decision_config)
         self.ai_volatility_target = float(self.ai_decision_config.get("volatility_target", 0.01))
         self.name = "Simple Trend Following Strategy"
@@ -65,6 +67,25 @@ class TrendFollowingStrategy(Strategy):
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         return true_range.rolling(window=period).mean()
 
+    def calculate_macd_histogram(self, prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
+        ema_fast = prices.ewm(span=fast, adjust=False).mean()
+        ema_slow = prices.ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        return macd_line - signal_line
+
+    def _get_scalping_setting(self, symbol: Optional[str], key: str, default):
+        if not isinstance(self.scalping_config, dict) or not bool(self.scalping_config.get("enabled", False)):
+            return default
+
+        value = self.scalping_config.get(key, default)
+        symbol_overrides = self.scalping_config.get("symbol_overrides", {})
+        if symbol and isinstance(symbol_overrides, dict):
+            symbol_cfg = symbol_overrides.get(symbol, {})
+            if isinstance(symbol_cfg, dict) and symbol_cfg.get(key) is not None:
+                value = symbol_cfg.get(key)
+        return value
+
     def _indicator_snapshot(self, data: pd.DataFrame) -> Optional[Dict[str, float]]:
         min_history = max(self.ema_long_period, self.rsi_period + 2, self.atr_period + 2)
         if data is None or data.empty or len(data) < min_history:
@@ -75,13 +96,21 @@ class TrendFollowingStrategy(Strategy):
         ema_long_series = self.calculate_ema(close, self.ema_long_period)
         rsi_series = self.calculate_rsi(close, self.rsi_period)
         atr_series = self.calculate_atr(data[["high", "low", "close"]].astype(float), self.atr_period)
+        macd_hist_series = self.calculate_macd_histogram(close)
+        volume_series = data["volume"].astype(float) if "volume" in data.columns else pd.Series(np.ones(len(data)), index=data.index)
 
         current_price = float(close.iloc[-1])
         ema_short = float(ema_short_series.iloc[-1])
         ema_long = float(ema_long_series.iloc[-1])
         rsi = float(rsi_series.iloc[-1])
+        previous_rsi = float(rsi_series.iloc[-2]) if len(rsi_series) >= 2 else rsi
         atr = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 0.0
         atr = atr if atr > 0 else max(current_price * 0.001, 1e-6)
+        macd_hist = float(macd_hist_series.iloc[-1]) if not pd.isna(macd_hist_series.iloc[-1]) else 0.0
+        previous_macd_hist = float(macd_hist_series.iloc[-2]) if len(macd_hist_series) >= 2 and not pd.isna(macd_hist_series.iloc[-2]) else macd_hist
+        volume_current = float(volume_series.iloc[-1]) if len(volume_series) >= 1 else 0.0
+        volume_avg_5 = float(volume_series.tail(5).mean()) if len(volume_series) >= 1 else 0.0
+        volume_ratio = (volume_current / volume_avg_5) if volume_avg_5 else 1.0
 
         lookback = min(5, len(close) - 1)
         prev_close = float(close.iloc[-(lookback + 1)]) if lookback > 0 else current_price
@@ -91,7 +120,13 @@ class TrendFollowingStrategy(Strategy):
             "ema_short": ema_short,
             "ema_long": ema_long,
             "rsi": rsi,
+            "previous_rsi": previous_rsi,
             "atr": atr,
+            "macd_hist": macd_hist,
+            "previous_macd_hist": previous_macd_hist,
+            "volume_current": volume_current,
+            "volume_avg_5": volume_avg_5,
+            "volume_ratio": volume_ratio,
             "previous_close": prev_close,
             "recent_return": ((current_price / prev_close) - 1.0) if prev_close else 0.0,
         }
@@ -130,6 +165,71 @@ class TrendFollowingStrategy(Strategy):
             "volatility_penalty": volatility_penalty,
         }
 
+    @staticmethod
+    def _signal_force(snapshot: Dict[str, float]) -> float:
+        trend_component = min(abs(snapshot["ema_short"] - snapshot["ema_long"]) / max(snapshot["atr"], 1e-6), 2.0) / 2.0
+        momentum_component = min(abs(snapshot["rsi"] - 50.0) / 20.0, 1.0)
+        breakout_component = min(abs(snapshot["recent_return"]) / max(snapshot["atr"] / max(snapshot["current_price"], 1e-6), 1e-6), 2.0) / 2.0
+        return max(0.0, min(1.0, (trend_component * 0.45) + (momentum_component * 0.35) + (breakout_component * 0.20)))
+
+    @staticmethod
+    def _trend_alignment_score(snapshot: Dict[str, float], signal: str) -> float:
+        if signal == SignalType.BUY:
+            aligned = snapshot["ema_short"] >= snapshot["ema_long"] and snapshot["current_price"] >= snapshot["ema_short"]
+        elif signal == SignalType.SELL:
+            aligned = snapshot["ema_short"] <= snapshot["ema_long"] and snapshot["current_price"] <= snapshot["ema_short"]
+        else:
+            aligned = False
+        return 1.0 if aligned else 0.25
+
+    @staticmethod
+    def _sl_tp_quality_score(entry_price: float, sl: Optional[float], tp: Optional[float]) -> float:
+        if entry_price is None or sl is None or tp is None:
+            return 0.0
+        risk = abs(float(entry_price) - float(sl))
+        reward = abs(float(tp) - float(entry_price))
+        if risk <= 0 or reward <= 0:
+            return 0.0
+        rr = reward / risk
+        if rr >= 2.0:
+            return 1.0
+        return max(0.0, min(1.0, rr / 2.0))
+
+    def build_trade_context(
+        self,
+        data: pd.DataFrame,
+        signal: str,
+        symbol: str = None,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+    ) -> Dict[str, float]:
+        snapshot = self._indicator_snapshot(data)
+        if snapshot is None:
+            return {
+                "atr": 0.0,
+                "rsi": 0.0,
+                "macd_hist": 0.0,
+                "macd_hist_delta_pct": 0.0,
+                "volume_ratio": 1.0,
+                "signal_force": 0.0,
+                "trend_alignment_score": 0.0,
+                "sl_tp_quality_score": 0.0,
+            }
+
+        current_price = snapshot["current_price"]
+        previous_macd_abs = max(abs(snapshot["previous_macd_hist"]), 1e-6)
+        return {
+            "atr": float(snapshot["atr"]),
+            "rsi": float(snapshot["rsi"]),
+            "rsi_delta": float(snapshot["rsi"] - snapshot["previous_rsi"]),
+            "macd_hist": float(snapshot["macd_hist"]),
+            "macd_hist_delta_pct": float((abs(snapshot["macd_hist"]) - abs(snapshot["previous_macd_hist"])) / previous_macd_abs),
+            "volume_ratio": float(snapshot["volume_ratio"]),
+            "signal_force": float(self._signal_force(snapshot)),
+            "trend_alignment_score": float(self._trend_alignment_score(snapshot, signal)),
+            "sl_tp_quality_score": float(self._sl_tp_quality_score(current_price, sl, tp)),
+        }
+
     def generate_decision(self, data: pd.DataFrame, symbol: str = None) -> Dict[str, Any]:
         snapshot = self._indicator_snapshot(data)
         if snapshot is None:
@@ -158,6 +258,7 @@ class TrendFollowingStrategy(Strategy):
 
         decision["metrics"] = {
             "rsi": round(snapshot["rsi"], 4),
+            "previous_rsi": round(snapshot["previous_rsi"], 4),
             "atr": round(snapshot["atr"], 6),
             "atr_pct": round(snapshot["atr"] / max(snapshot["current_price"], 1e-6), 6),
             "price": round(snapshot["current_price"], 6),
@@ -166,6 +267,13 @@ class TrendFollowingStrategy(Strategy):
             "ema_spread": round(snapshot["ema_short"] - snapshot["ema_long"], 6),
             "ema_spread_pct": round((snapshot["ema_short"] - snapshot["ema_long"]) / max(snapshot["current_price"], 1e-6), 6),
             "recent_return": round(snapshot["recent_return"], 6),
+            "macd_hist": round(snapshot["macd_hist"], 6),
+            "previous_macd_hist": round(snapshot["previous_macd_hist"], 6),
+            "volume_ratio": round(snapshot["volume_ratio"], 6),
+            "volume_current": round(snapshot["volume_current"], 2),
+            "volume_avg_5": round(snapshot["volume_avg_5"], 2),
+            "signal_force": round(self._signal_force(snapshot), 6),
+            "trend_alignment_score": round(self._trend_alignment_score(snapshot, decision.get("signal", SignalType.HOLD)), 6),
         }
         return decision
 
@@ -213,6 +321,7 @@ class TrendFollowingStrategy(Strategy):
                     sl_multiplier = float(override.get("sl_atr"))
                 if override.get("tp_atr") is not None:
                     tp_multiplier = float(override.get("tp_atr"))
+        tp_multiplier = float(self._get_scalping_setting(symbol, "tp_multiplier", tp_multiplier))
 
         signal_upper = signal.upper()
         if signal_upper == SignalType.BUY:

@@ -26,6 +26,7 @@ class Broker(ExchangeInterface):
         # Get dry_run setting from config
         trading_config = config.get('trading', {})
         self.dry_run = trading_config.get('dry_run', True)
+        self.min_order_interval_seconds = float(trading_config.get('min_order_interval_seconds', 1.0))
         
         # Initialize logger
         try:
@@ -203,8 +204,8 @@ class Broker(ExchangeInterface):
         current_time = pd.Timestamp.now()
         if symbol in self._last_order_times:
             time_diff = current_time - self._last_order_times[symbol]
-            # Prevent multiple orders on the same "bar" (using a small threshold like 10 seconds)
-            if time_diff.total_seconds() < 10:
+            # Runner-level intra-bar throttling is the main safeguard; broker keeps only a very short duplicate block.
+            if time_diff.total_seconds() < self.min_order_interval_seconds:
                 self.logger.warning(f"Not placing order for {symbol}: order already placed {time_diff.total_seconds():.1f}s ago")
                 return OrderResult(success=False, message="duplicate_order_blocked")
         
@@ -336,6 +337,47 @@ class Broker(ExchangeInterface):
             message="simulated_close",
             comment=comment,
             details={"profit": float(pnl), "exit_price": float(exit_price)},
+        )
+
+    def update_position_protection(
+        self,
+        ticket: str,
+        symbol: str,
+        sl: float,
+        tp: float,
+        comment: str = "TradePy Protection Update",
+    ) -> OrderResult:
+        """Update protection levels for an existing simulated position."""
+        if not ticket:
+            return OrderResult(success=False, message="invalid_ticket")
+
+        target = None
+        for position in self._positions:
+            position_ticket = str(position.get("ticket") or position.get("id") or "")
+            if position_ticket == str(ticket):
+                target = position
+                break
+
+        if target is None:
+            if self.dry_run:
+                self.logger.info(
+                    f"DRY_RUN_PROTECTION_UPDATE_SIMULATED - Ticket: {ticket} | Symbol: {symbol} | SL: {sl} | TP: {tp}"
+                )
+                return OrderResult(success=True, order_id=str(ticket), message="dry_run_protection_update")
+            return OrderResult(success=False, order_id=str(ticket), message="position_not_found")
+
+        target["sl"] = float(sl)
+        target["tp"] = float(tp)
+        self.logger.info(
+            f"SIM_PROTECTION_UPDATED - Ticket: {ticket} | Symbol: {symbol or target.get('symbol')} | "
+            f"SL: {sl} | TP: {tp} | Comment: {comment}"
+        )
+        return OrderResult(
+            success=True,
+            order_id=str(ticket),
+            message="protection_updated",
+            comment=comment,
+            details={"sl": float(sl), "tp": float(tp)},
         )
 
     def get_historical_data(self, symbol: str, timeframe: str, start_date: str, end_date: str):

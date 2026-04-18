@@ -322,6 +322,92 @@ class MT5Executor(LiveExchangeInterface):
             details={"result": result},
         )
 
+    def update_position_protection(
+        self,
+        ticket: str,
+        symbol: str,
+        sl: float,
+        tp: float,
+        comment: str = "TradePy Protection Update",
+    ) -> OrderResult:
+        if not ticket:
+            return OrderResult(success=False, message="invalid_ticket")
+
+        resolved = self._resolve_symbol(symbol)
+        if not resolved:
+            return OrderResult(success=False, order_id=str(ticket), message=f"symbol_select_failed: {mt5.last_error()}")
+
+        try:
+            position_id = int(ticket)
+        except (TypeError, ValueError):
+            return OrderResult(success=False, order_id=str(ticket), message="invalid_ticket")
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": resolved,
+            "position": position_id,
+            "sl": float(sl),
+            "tp": float(tp),
+            "magic": 234000,
+            "comment": comment,
+        }
+
+        if self.dry_run:
+            self.logger.info(
+                f"MT5_DRY_RUN_PROTECTION_UPDATE - Ticket: {ticket} - {resolved} | SL: {sl} | TP: {tp} | Comment: {comment}"
+            )
+            return OrderResult(
+                success=True,
+                order_id=str(ticket),
+                retcode=None,
+                comment=comment,
+                request=request,
+                message="dry_run_protection_update",
+            )
+
+        result = mt5.order_send(request)
+        if result is None:
+            self.logger.error(
+                f"MT5_PROTECTION_UPDATE_FAILED - Ticket: {ticket} - Symbol: {resolved} - Retcode: N/A - "
+                f"Comment: order_send returned None"
+            )
+            return OrderResult(
+                success=False,
+                order_id=str(ticket),
+                retcode=None,
+                comment="order_send returned None",
+                request=request,
+                message="order_send_none",
+            )
+
+        retcode = getattr(result, "retcode", None)
+        result_comment = getattr(result, "comment", "")
+        success_codes = {
+            getattr(mt5, "TRADE_RETCODE_DONE", None),
+            getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", None),
+        }
+        success = retcode in success_codes
+
+        if success:
+            self.logger.info(
+                f"MT5_PROTECTION_UPDATED - Ticket: {ticket} - {resolved} | SL: {sl} | TP: {tp} | Retcode: {retcode}"
+            )
+        else:
+            self.logger.error(
+                f"MT5_PROTECTION_UPDATE_FAILED - Ticket: {ticket} - Symbol: {resolved} - "
+                f"Retcode: {retcode} - Comment: {result_comment}"
+            )
+
+        return OrderResult(
+            success=success,
+            order_id=str(ticket),
+            retcode=retcode,
+            comment=result_comment or comment,
+            request=request,
+            message="protection_updated" if success else "protection_update_failed",
+            details={"result": result, "sl": float(sl), "tp": float(tp)},
+        )
+
     def _normalize_volume(self, volume: float, symbol_info) -> float:
         """
         Normalize volume based on symbol's volume constraints.
