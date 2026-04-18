@@ -649,6 +649,7 @@ class LiveRunner:
         trade["requested_trade_id"] = old_key
         self._open_trades[ticket] = trade
         self._ensure_trade_state(ticket, position_info)
+        self.auto_close_scheduler.transfer_ticket(str(old_key), str(ticket))
 
     def _record_signal_snapshot(self, payload: dict) -> None:
         if self.snapshot_store is None:
@@ -1955,6 +1956,7 @@ class LiveRunner:
                                                     spread_points=spread_points,
                                                     reentry_count=reentry_count,
                                                 )
+                                                self.auto_close_scheduler.register_trade(str(trade_id), order_now)
                                                 self._mark_trade_attempt(symbol, trade_bar_time, signal, order_now, entry_price)
                                                 if reentry_count > 0:
                                                     self.logger.logger.info(

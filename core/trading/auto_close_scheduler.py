@@ -53,6 +53,14 @@ class AutoCloseScheduler:
         if ticket in self.open_trades:
             del self.open_trades[ticket]
             self.logger.info(f"AUTO_CLOSE_UNREGISTERED - Ticket: {ticket}")
+
+    def transfer_ticket(self, old_ticket: str, new_ticket: str) -> None:
+        """Move monitoring from a provisional id (e.g. pre-sync) to the exchange ticket."""
+        old = str(old_ticket)
+        new = str(new_ticket)
+        if old in self.open_trades and old != new:
+            self.open_trades[new] = self.open_trades.pop(old)
+            self.logger.info(f"AUTO_CLOSE_TRANSFER - From: {old} | To: {new}")
     
     def check_and_close_expired_trades(self) -> List[OrderResult]:
         """
