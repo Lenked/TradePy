@@ -19,10 +19,10 @@ strategy:
   ai_decision:
     enabled: true
     allow_ai_override: false
-    buy_threshold: 0.58
-    sell_threshold: 0.58
-    override_threshold: 0.66
-    min_signal_gap: 0.05
+    buy_threshold: 0.62
+    sell_threshold: 0.62
+    override_threshold: 0.70
+    min_signal_gap: 0.08
     base_signal_bonus: 0.08
     conflict_penalty: 0.10
     volatility_target: 0.01
@@ -57,44 +57,49 @@ strategy:
       tp_atr: 3.5
   scalping:
     enabled: true
-    break_even_trigger_pct: 0.25
-    break_even_offset_usd: 0.10
-    secure_profit_trigger_pct: 0.50
-    secure_profit_lock_pct: 0.40
+    min_reward_risk_ratio: 1.00
+    break_even_trigger_pct: 0.35
+    break_even_offset_usd: 0.15
+    secure_profit_trigger_pct: 0.75
+    secure_profit_lock_pct: 0.55
     trailing_stop_enabled: true
-    trailing_stop_distance_atr_multiplier: 0.45
+    trailing_stop_activation_pct: 0.55
+    trailing_stop_distance_atr_multiplier: 0.80
     fast_exit_on_reversal: true
     reversal_candles_required: 1
     symbol_overrides:
       BTCUSDm:
-        tp_multiplier: 0.35
-        trailing_stop_distance_atr_multiplier: 0.40
+        min_reward_risk_ratio: 1.10
+        tp_multiplier: 2.20
+        trailing_stop_distance_atr_multiplier: 0.75
       XAUUSDm:
-        tp_multiplier: 0.45
-        trailing_stop_distance_atr_multiplier: 0.45
+        min_reward_risk_ratio: 1.10
+        tp_multiplier: 3.00
+        trailing_stop_distance_atr_multiplier: 0.90
       USOILm:
-        tp_multiplier: 0.40
-        trailing_stop_distance_atr_multiplier: 0.45
+        min_reward_risk_ratio: 1.10
+        tp_multiplier: 2.00
+        trailing_stop_distance_atr_multiplier: 0.85
   intra_bar_trading:
     enabled: true
-    max_trades_per_bar: 5
-    min_seconds_between_trades: 8
-    allow_reentry_same_direction: true
-    allow_reentry_after_tp: true
+    max_trades_per_bar: 1
+    min_seconds_between_trades: 20
+    allow_reentry_same_direction: false
+    allow_reentry_after_tp: false
     allow_reverse_trade_same_bar: false
-    require_price_move_pct_between_entries: 0.08
+    require_price_move_pct_between_entries: 0.18
     require_new_high_low_breakout: true
-    cooldown_after_loss_seconds: 30
+    cooldown_after_loss_seconds: 180
     symbol_overrides:
       BTCUSDm:
-        max_trades_per_bar: 7
-        min_seconds_between_trades: 5
+        max_trades_per_bar: 1
+        min_seconds_between_trades: 30
       XAUUSDm:
-        max_trades_per_bar: 5
-        min_seconds_between_trades: 10
+        max_trades_per_bar: 1
+        min_seconds_between_trades: 30
       USOILm:
-        max_trades_per_bar: 4
-        min_seconds_between_trades: 15
+        max_trades_per_bar: 1
+        min_seconds_between_trades: 45
 
 risk:
   max_daily_loss_pct: 0.02
@@ -229,8 +234,9 @@ risk:
 
 # Symboles à exclure du trading (ex: USOILm très perdant sur l'historique)
 # Décommenter pour désactiver temporairement un symbole
-# symbols_disabled:
-#   - USOILm
+# USOILm is intentionally disabled for now.
+symbols_disabled:
+  - USOILm
 
 symbol_schedule:
   # Saturday

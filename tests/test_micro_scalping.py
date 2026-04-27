@@ -145,6 +145,23 @@ def test_trailing_stop_ultra_aggressive():
     assert runner._open_trades["1"]["used_trailing"] is True
 
 
+def test_trailing_stop_waits_for_activation_progress():
+    df = _make_df(last_close=102.0)
+    runner = _runner(
+        df=df,
+        current_price=102.0,
+        scalping_overrides={
+            "break_even_trigger_pct": 1.0,
+            "secure_profit_trigger_pct": 1.0,
+            "trailing_stop_activation_pct": 0.50,
+        },
+    )
+
+    assert runner._apply_scalping_management(_position(), now=datetime(2024, 1, 1, 0, 8, 0)) is False
+    assert runner.exchange.protection_updates == []
+    assert runner._open_trades["1"].get("used_trailing", False) is False
+
+
 def test_intra_bar_multiple_reentries():
     df = _make_df(last_close=101.0)
     runner = _runner(df=df, current_price=101.0)

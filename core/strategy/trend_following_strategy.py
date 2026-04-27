@@ -86,6 +86,13 @@ class TrendFollowingStrategy(Strategy):
                 value = symbol_cfg.get(key)
         return value
 
+    def _get_min_reward_risk_ratio(self, symbol: Optional[str]) -> float:
+        raw_value = self._get_scalping_setting(symbol, "min_reward_risk_ratio", 0.0)
+        try:
+            return max(0.0, float(raw_value or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
     def _indicator_snapshot(self, data: pd.DataFrame) -> Optional[Dict[str, float]]:
         min_history = max(self.ema_long_period, self.rsi_period + 2, self.atr_period + 2)
         if data is None or data.empty or len(data) < min_history:
@@ -322,6 +329,9 @@ class TrendFollowingStrategy(Strategy):
                 if override.get("tp_atr") is not None:
                     tp_multiplier = float(override.get("tp_atr"))
         tp_multiplier = float(self._get_scalping_setting(symbol, "tp_multiplier", tp_multiplier))
+        min_reward_risk_ratio = self._get_min_reward_risk_ratio(symbol)
+        if min_reward_risk_ratio > 0:
+            tp_multiplier = max(tp_multiplier, sl_multiplier * min_reward_risk_ratio)
 
         signal_upper = signal.upper()
         if signal_upper == SignalType.BUY:

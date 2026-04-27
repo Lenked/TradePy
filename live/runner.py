@@ -1217,6 +1217,9 @@ class LiveRunner:
             break_even_offset = self._safe_float(config.get("break_even_offset_usd"), 0.0)
             secure_profit_trigger = self._safe_float(config.get("secure_profit_trigger_pct"), 0.50)
             secure_profit_lock_pct = self._safe_float(config.get("secure_profit_lock_pct"), 0.40)
+            trailing_stop_activation_pct = max(
+                0.0, self._safe_float(config.get("trailing_stop_activation_pct"), 0.0)
+            )
 
             if progress >= break_even_trigger and not trade.get("touched_break_even"):
                 candidate_sl = entry_price + break_even_offset if side == "BUY" else entry_price - break_even_offset
@@ -1239,7 +1242,11 @@ class LiveRunner:
                     f"Progress: {progress:.2f} | LockedPct: {secure_profit_lock_pct:.2f} | NewSL: {candidate_sl}"
                 )
 
-            if config.get("trailing_stop_enabled", False) and progress > 0:
+            if (
+                config.get("trailing_stop_enabled", False)
+                and progress > 0
+                and progress >= trailing_stop_activation_pct
+            ):
                 trailing_distance = atr * self._safe_float(config.get("trailing_stop_distance_atr_multiplier"), 0.45)
                 trailing_sl = current_price - trailing_distance if side == "BUY" else current_price + trailing_distance
                 if self._is_more_protective_stop(side, trailing_sl, desired_sl):

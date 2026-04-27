@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from ai.decision import HybridDecisionEngine
 from core.strategy.signal import SignalType
@@ -72,3 +73,24 @@ def test_strategy_generate_decision_returns_buy_on_strong_uptrend():
 
     assert decision["signal"] == SignalType.BUY
     assert decision["confidence"] > 0.0
+
+
+def test_compute_sl_tp_enforces_min_reward_risk_ratio_for_scalping():
+    df = _build_trend_df("up", periods=120)
+    strategy = TrendFollowingStrategy(
+        sl_atr_multiplier=2.0,
+        tp_atr_multiplier=3.0,
+        scalping_config={
+            "enabled": True,
+            "tp_multiplier": 0.35,
+            "min_reward_risk_ratio": 1.1,
+        },
+    )
+
+    sl, tp = strategy.compute_sl_tp(df, SignalType.BUY)
+    entry_price = float(df["close"].iloc[-1])
+    risk = entry_price - sl
+    reward = tp - entry_price
+
+    assert risk > 0
+    assert reward / risk == pytest.approx(1.1, rel=1e-6)
