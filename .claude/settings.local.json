@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Head *)",
+      "PowerShell(ls \"D:\\\\IA RESEARCH\\\\TradePy\\\\tests\\\\\" | where {$_.Extension -eq '.py'})",
+      "PowerShell(ls \"D:\\\\IA RESEARCH\\\\TradePy\\\\backtest\\\\\" | Where-Object {$_.Name -ne '__pycache__'})",
+      "PowerShell(ls \"D:\\\\IA RESEARCH\\\\TradePy\\\\core\\\\data\\\\\" | Where-Object {$_.Name -ne '__pycache__'})",
+      "PowerShell(ls \"D:\\\\IA RESEARCH\\\\TradePy\\\\core\\\\risk\\\\\" | Where-Object {$_.Name -ne '__pycache__'})",
+      "PowerShell(ls \"D:\\\\IA RESEARCH\\\\TradePy\\\\core\\\\strategy\\\\\" | Where-Object {$_.Name -ne '__pycache__'})",
+      "PowerShell(ls \"D:\\\\IA RESEARCH\\\\TradePy\\\\core\\\\trading\\\\\" | Where-Object {$_.Name -ne '__pycache__'})",
+      "PowerShell(ls \"D:\\\\IA RESEARCH\\\\TradePy\\\\core\\\\reporting\\\\\" | Where-Object {$_.Name -ne '__pycache__'})",
+      "PowerShell(ls \"D:\\\\IA RESEARCH\\\\TradePy\" -File | Where-Object {$_.Extension -in '.json', '.db', '.sqlite', '.csv'})",
+      "WebFetch(domain:used-voters-rational-varieties.trycloudflare.com)"
+    ]
+  }
+}

@@ -5,121 +5,121 @@ trading:
   use_mt5: true
   dry_run: false
   timeframe: 5
-  # Multi-timeframe scan (minutes). If defined, it overrides `timeframe`.
   timeframes: [5, 15, 60]
-  # Conflict resolution: prefer this timeframe if signals disagree
   preferred_timeframe: 15
   poll_seconds: 5
   min_order_interval_seconds: 1
 
 strategy:
-  # Default ATR multiples for SL/TP (réduire les sorties en SL = donner plus de marge)
-  sl_atr_multiplier: 2.0
-  tp_atr_multiplier: 3.0
+  # SL/TP ATR: légèrement élargi pour donner de la marge aux trades
+  sl_atr_multiplier: 2.2
+  tp_atr_multiplier: 3.5
+  ema_short_period: 50
+  ema_long_period: 200
+  rsi_period: 14
+  atr_period: 14
   ai_decision:
     enabled: true
     allow_ai_override: false
-    buy_threshold: 0.62
-    sell_threshold: 0.62
+    buy_threshold: 0.55
+    sell_threshold: 0.55
     override_threshold: 0.70
-    min_signal_gap: 0.08
-    base_signal_bonus: 0.08
-    conflict_penalty: 0.10
+    min_signal_gap: 0.06
+    base_signal_bonus: 0.10
+    conflict_penalty: 0.08
     volatility_target: 0.01
     weights:
       trend: 0.35
       momentum: 0.25
       alignment: 0.20
       breakout: 0.20
-      volatility: 0.15
+      volatility: 0.10
   decision_guard:
     enabled: true
-    mode: shadow
+    mode: enforce
     target: label_big_loss
     model_path: "artifacts/models/dashboard_decision_model_bundle.joblib"
     seed_dashboard_path: "data/dashboard.json"
-    block_threshold: 0.68
-    throttle_threshold: 0.55
-    throttle_factor: 0.65
+    block_threshold: 0.75
+    throttle_threshold: 0.60
+    throttle_factor: 0.70
     snapshots_path: "runtime/ai_signal_snapshots.jsonl"
-  # Filtres RSI: éviter entrées en surachat/survente (optionnel)
-  rsi_buy_max: 70    # BUY seulement si RSI < 70
-  rsi_sell_min: 30   # SELL seulement si RSI > 30
-  # Overrides SL/TP par symbole (volatilité différente)
+  # RSI: élargi pour ne pas filtrer trop de signaux valides
+  rsi_buy_max: 75
+  rsi_sell_min: 25
   sl_tp_overrides_by_symbol:
-    # USOIL: élargi (avant 0.6/0.9 = trop serré → trop de SL)
     USOILm:
-      sl_atr: 1.5
-      tp_atr: 2.5
-    # XAU: SL un peu plus large pour absorber les spikes, TP plus haut pour le R:R
+      sl_atr: 1.8
+      tp_atr: 3.0
     XAUUSDm:
       sl_atr: 2.5
+      tp_atr: 4.0
+    BTCUSDm:
+      sl_atr: 2.3
       tp_atr: 3.5
   scalping:
     enabled: true
     min_reward_risk_ratio: 1.00
-    break_even_trigger_pct: 0.35
-    break_even_offset_usd: 0.15
-    secure_profit_trigger_pct: 0.75
-    secure_profit_lock_pct: 0.55
+    break_even_trigger_pct: 0.40
+    break_even_offset_usd: 0.10
+    secure_profit_trigger_pct: 0.70
+    secure_profit_lock_pct: 0.50
     trailing_stop_enabled: true
-    trailing_stop_activation_pct: 0.55
-    trailing_stop_distance_atr_multiplier: 0.80
+    trailing_stop_activation_pct: 0.50
+    trailing_stop_distance_atr_multiplier: 0.85
     fast_exit_on_reversal: true
-    reversal_candles_required: 1
+    reversal_candles_required: 2
     symbol_overrides:
       BTCUSDm:
-        min_reward_risk_ratio: 1.10
+        min_reward_risk_ratio: 1.00
         tp_multiplier: 2.20
-        trailing_stop_distance_atr_multiplier: 0.75
+        trailing_stop_distance_atr_multiplier: 0.80
       XAUUSDm:
-        min_reward_risk_ratio: 1.10
+        min_reward_risk_ratio: 1.00
         tp_multiplier: 3.00
         trailing_stop_distance_atr_multiplier: 0.90
       USOILm:
-        min_reward_risk_ratio: 1.10
-        tp_multiplier: 2.00
+        min_reward_risk_ratio: 1.00
+        tp_multiplier: 2.50
         trailing_stop_distance_atr_multiplier: 0.85
   intra_bar_trading:
     enabled: true
     max_trades_per_bar: 1
     min_seconds_between_trades: 20
     allow_reentry_same_direction: false
-    allow_reentry_after_tp: false
+    allow_reentry_after_tp: true
     allow_reverse_trade_same_bar: false
-    require_price_move_pct_between_entries: 0.18
+    require_price_move_pct_between_entries: 0.15
     require_new_high_low_breakout: true
-    cooldown_after_loss_seconds: 180
+    cooldown_after_loss_seconds: 120
     symbol_overrides:
       BTCUSDm:
         max_trades_per_bar: 1
-        min_seconds_between_trades: 30
+        min_seconds_between_trades: 25
       XAUUSDm:
         max_trades_per_bar: 1
-        min_seconds_between_trades: 30
+        min_seconds_between_trades: 25
       USOILm:
         max_trades_per_bar: 1
-        min_seconds_between_trades: 45
+        min_seconds_between_trades: 35
 
 risk:
-  max_daily_loss_pct: 0.02
-  max_daily_loss_usd: 60
-  max_consecutive_losses: 2
-  max_trades_per_day: 8
-  # Per-symbol daily trade limits
+  max_daily_loss_pct: 0.03
+  max_daily_loss_usd: 40
+  max_consecutive_losses: 5
+  max_trades_per_day: 15
   max_trades_per_day_by_symbol:
-    BTCUSDm: 3
-    XAUUSDm: 2
-    USOILm: 2
-    EURUSDm: 2
-    NVDAm: 1
+    BTCUSDm: 5
+    XAUUSDm: 4
+    USOILm: 3
+    EURUSDm: 3
+    NVDAm: 2
   max_open_trades_per_symbol: 1
-  max_global_open_positions: 2
-  cooldown_minutes_after_loss: 30          # base for all symbols
-  global_cooldown_minutes_after_loss: 15   # small global freeze to prevent spirals
+  max_global_open_positions: 3
+  cooldown_minutes_after_loss: 10
+  global_cooldown_minutes_after_loss: 5
   one_trade_per_symbol_per_day: false
   cooldown_minutes_after_trade_per_symbol: 0
-  # Disable daily profit lock for now (set to >0 to re-enable)
   daily_profit_target_usd: 0
   profit_lock_mode: "cooldown_hours"
   profit_lock_hours: 6
@@ -127,72 +127,74 @@ risk:
   daily_reset_hour: 0
   trading_session:
     enabled: true
-    start_hour: 16
+    start_hour: 15
     start_minute: 0
-    end_hour: 6
+    end_hour: 7
     end_minute: 0
   trading_session_by_symbol:
     BTCUSDm:
       enabled: true
-      start_hour: 16
+      start_hour: 0
       start_minute: 0
-      end_hour: 6
+      end_hour: 0
       end_minute: 0
     XAUUSDm:
       enabled: true
-      start_hour: 16
+      start_hour: 15
       start_minute: 0
       end_hour: 23
-      end_minute: 0
+      end_minute: 30
     USOILm:
       enabled: true
-      start_hour: 16
+      start_hour: 15
       start_minute: 0
       end_hour: 22
-      end_minute: 0
+      end_minute: 30
     EURUSDm:
       enabled: true
-      start_hour: 16
+      start_hour: 15
       start_minute: 0
       end_hour: 23
-      end_minute: 0
+      end_minute: 30
     NVDAm:
       enabled: true
-      start_hour: 16
-      start_minute: 0
+      start_hour: 15
+      start_minute: 30
       end_hour: 22
       end_minute: 0
   state_path: "runtime/state.json"
 
-  max_spread_points: 35
-  max_slippage_points: 35
+  max_spread_points: 50
+  max_slippage_points: 50
 
   max_spread_points_by_symbol:
-    BTCUSDm: 2500
-    XAUUSDm: 1000
-    USOILm: 120
-  
-  max_slippage_points_by_symbol:
-    BTCUSDm: 20000
+    BTCUSDm: 3000
     XAUUSDm: 1200
     USOILm: 150
+    EURUSDm: 30
+    NVDAm: 50
+
+  max_slippage_points_by_symbol:
+    BTCUSDm: 25000
+    XAUUSDm: 1500
+    USOILm: 200
+    EURUSDm: 40
+    NVDAm: 60
 
   cooldown_overrides_by_symbol:
-    BTCUSDm: 5
-    XAUUSDm: 15
-    USOILm: 20
-    EURUSDm: 10
-    NVDAm: 15
-
-  # Hard stop by symbol if realized PnL for the trading day drops below -limit
-  symbol_daily_loss_limit_usd_by_symbol:
-    BTCUSDm: 20
-    XAUUSDm: 15
+    BTCUSDm: 3
+    XAUUSDm: 8
     USOILm: 10
-    EURUSDm: 8
-    NVDAm: 8
+    EURUSDm: 5
+    NVDAm: 10
 
-  # Symbol-specific risk overrides
+  symbol_daily_loss_limit_usd_by_symbol:
+    BTCUSDm: 15
+    XAUUSDm: 12
+    USOILm: 8
+    EURUSDm: 6
+    NVDAm: 6
+
   max_open_trades_per_symbol_by_symbol:
     BTCUSDm: 1
     XAUUSDm: 1
@@ -202,10 +204,10 @@ risk:
 
   cooldown_after_trade_overrides_by_symbol:
     BTCUSDm: 0
-    XAUUSDm: 15
-    USOILm: 20
-    EURUSDm: 10
-    NVDAm: 30
+    XAUUSDm: 5
+    USOILm: 10
+    EURUSDm: 5
+    NVDAm: 15
 
   position_sizing:
     defaults:
@@ -213,33 +215,37 @@ risk:
       min_lot: 0.01
       lot_step: 0.01
       risk_per_trade_pct: 0.01
-      confidence_floor: 0.80
-      confidence_ceiling: 1.25
-      soft_max_sl_distance_pct: 0.01
-      soft_max_tp_distance_pct: 0.02
-      hard_max_sl_distance_pct: 0.03
-      hard_max_tp_distance_pct: 0.06
-      wide_distance_min_factor: 0.35
+      confidence_floor: 0.85
+      confidence_ceiling: 1.20
+      soft_max_sl_distance_pct: 0.015
+      soft_max_tp_distance_pct: 0.03
+      hard_max_sl_distance_pct: 0.04
+      hard_max_tp_distance_pct: 0.08
+      wide_distance_min_factor: 0.40
     per_symbol:
       BTCUSDm:
-        multiplier: 1.5
+        multiplier: 1.3
         risk_per_trade_pct: 0.008
       XAUUSDm:
-        multiplier: 1.3
-        risk_per_trade_pct: 0.009
-      USOILm:
-        multiplier: 1.1
+        multiplier: 1.2
         risk_per_trade_pct: 0.008
-    max_lot: 0.30
+      USOILm:
+        multiplier: 1.0
+        risk_per_trade_pct: 0.007
+      EURUSDm:
+        multiplier: 1.0
+        risk_per_trade_pct: 0.008
+      NVDAm:
+        multiplier: 0.8
+        risk_per_trade_pct: 0.006
+    max_lot: 0.20
 
-# Symboles à exclure du trading (ex: USOILm très perdant sur l'historique)
-# Décommenter pour désactiver temporairement un symbole
-# USOILm is intentionally disabled for now.
+# USOILm reste désactivé — perte de -$158, à réactiver après analyse
 symbols_disabled:
   - USOILm
 
 symbol_schedule:
-  # Saturday
-  5: ["XAUUSDm"]
-  # Sunday
-  6: ["XAUUSDm"]
+  # Samedi — BTC trade 24/7
+  5: ["BTCUSDm"]
+  # Dimanche — BTC trade 24/7
+  6: ["BTCUSDm"]
