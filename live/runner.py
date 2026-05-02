@@ -54,9 +54,9 @@ class LiveRunner:
         self._session_close_attempts = {}
         self._session_close_retry_seconds = 60
         self._reporter = TradeReporter()
-        
-        # Initialize auto-close scheduler to close trades after 90 minutes
-        self.auto_close_scheduler = AutoCloseScheduler(exchange, timeout_minutes=90)
+
+        # Initialize auto-close scheduler to close trades after 4 hours
+        self.auto_close_scheduler = AutoCloseScheduler(exchange, timeout_minutes=240)
 
         # Initialize rate-limited logger to reduce "waiting for new bar" noise
         self.logger = RateLimitedLogger("LiveRunner", min_interval=60)  # Log every 60 seconds

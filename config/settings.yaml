@@ -11,9 +11,9 @@ trading:
   min_order_interval_seconds: 1
 
 strategy:
-  # SL/TP ATR: légèrement élargi pour donner de la marge aux trades
+  # SL/TP ATR: TP élargi pour viser des gains de $10+ avant de sécuriser
   sl_atr_multiplier: 2.2
-  tp_atr_multiplier: 3.5
+  tp_atr_multiplier: 4.5
   ema_short_period: 50
   ema_long_period: 200
   rsi_period: 14
@@ -50,38 +50,39 @@ strategy:
   sl_tp_overrides_by_symbol:
     USOILm:
       sl_atr: 1.8
-      tp_atr: 3.0
+      tp_atr: 4.0
     XAUUSDm:
       sl_atr: 2.5
-      tp_atr: 4.0
+      tp_atr: 5.0
     BTCUSDm:
       sl_atr: 2.3
-      tp_atr: 3.5
+      tp_atr: 4.5
   scalping:
     enabled: true
-    min_reward_risk_ratio: 1.00
-    break_even_trigger_pct: 0.40
-    break_even_offset_usd: 0.10
-    secure_profit_trigger_pct: 0.70
-    secure_profit_lock_pct: 0.50
+    min_reward_risk_ratio: 1.20
+    # Ne pas sécuriser trop tôt — laisser le trade courir vers $10+
+    break_even_trigger_pct: 0.65
+    break_even_offset_usd: 0.50
+    secure_profit_trigger_pct: 0.85
+    secure_profit_lock_pct: 0.75
     trailing_stop_enabled: true
-    trailing_stop_activation_pct: 0.50
-    trailing_stop_distance_atr_multiplier: 0.85
-    fast_exit_on_reversal: true
-    reversal_candles_required: 2
+    trailing_stop_activation_pct: 0.70
+    trailing_stop_distance_atr_multiplier: 1.50
+    fast_exit_on_reversal: false
+    reversal_candles_required: 3
     symbol_overrides:
       BTCUSDm:
-        min_reward_risk_ratio: 1.00
-        tp_multiplier: 2.20
-        trailing_stop_distance_atr_multiplier: 0.80
-      XAUUSDm:
-        min_reward_risk_ratio: 1.00
-        tp_multiplier: 3.00
-        trailing_stop_distance_atr_multiplier: 0.90
-      USOILm:
-        min_reward_risk_ratio: 1.00
+        min_reward_risk_ratio: 1.20
         tp_multiplier: 2.50
-        trailing_stop_distance_atr_multiplier: 0.85
+        trailing_stop_distance_atr_multiplier: 1.60
+      XAUUSDm:
+        min_reward_risk_ratio: 1.20
+        tp_multiplier: 3.50
+        trailing_stop_distance_atr_multiplier: 1.50
+      USOILm:
+        min_reward_risk_ratio: 1.20
+        tp_multiplier: 3.00
+        trailing_stop_distance_atr_multiplier: 1.40
   intra_bar_trading:
     enabled: true
     max_trades_per_bar: 1
