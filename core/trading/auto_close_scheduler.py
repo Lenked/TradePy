@@ -117,7 +117,7 @@ class AutoCloseScheduler:
         position_to_close = None
         
         for pos in positions:
-            pos_ticket = str(pos.get("ticket") or pos.get("id") or "")
+            pos_ticket = str(getattr(pos, "ticket", None) or getattr(pos, "id", None) or "")
             if pos_ticket == ticket:
                 position_to_close = pos
                 break
@@ -131,10 +131,11 @@ class AutoCloseScheduler:
                 comment="Position not found, likely already closed"
             )
         
-        # Extract position details
-        symbol = position_to_close.get("symbol")
-        side = position_to_close.get("side")
-        volume = float(position_to_close.get("volume", 0.0))
+        # Extract position details (MT5 TradePosition uses attributes, not dict)
+        symbol = getattr(position_to_close, "symbol", None)
+        raw_type = getattr(position_to_close, "type", None)
+        side = "BUY" if raw_type == 0 else "SELL" if raw_type == 1 else None
+        volume = float(getattr(position_to_close, "volume", 0.0))
         
         if not all([symbol, side, volume]):
             return OrderResult(
